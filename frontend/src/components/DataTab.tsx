@@ -11,12 +11,15 @@ interface FileInfo {
 
 interface DataTabProps {
   fileInfo: FileInfo | null;
+  dataVersion: "current" | "original";
+  onVersionChange: (version: "current" | "original") => void;
 }
 
-export function DataTab({ fileInfo }: DataTabProps) {
+export function DataTab({ fileInfo, dataVersion, onVersionChange }: DataTabProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [sortColumn, setSortColumn] = useState<string | null>(null);
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
+  const [versionDropdownOpen, setVersionDropdownOpen] = useState(false);
 
   // If no file uploaded, show placeholder
   if (!fileInfo) {
@@ -65,12 +68,55 @@ export function DataTab({ fileInfo }: DataTabProps) {
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
-      {/* Info + Search Row */}
-      <div className="flex items-center gap-4 px-5 py-3 shrink-0">
-        <div className="flex items-center gap-2 shrink-0">
-          <span className="text-[11px] text-[#8E8E93]">
-            {fileInfo.row_count} rows · {fileInfo.column_count} cols
-          </span>
+      {/* Version Dropdown + Search Row */}
+      <div className="flex items-center gap-3 px-5 py-3 shrink-0">
+        <div className="relative shrink-0">
+          <button
+            onClick={() => setVersionDropdownOpen(!versionDropdownOpen)}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-black/5 hover:bg-black/10 transition-colors"
+          >
+            <span className="text-[11px] text-[rgba(0,0,0,0.85)]" style={{ fontWeight: 510 }}>
+              {dataVersion === "current" ? "Current" : "Initial"}
+            </span>
+            <span className="text-[10px] text-[#8E8E93]">
+              {fileInfo.row_count}×{fileInfo.column_count}
+            </span>
+            <ChevronDown className="w-3 h-3 text-[#8E8E93]" />
+          </button>
+          {versionDropdownOpen && (
+            <>
+              <div
+                className="fixed inset-0 z-40"
+                onClick={() => setVersionDropdownOpen(false)}
+              />
+              <div className="absolute left-0 top-full mt-1 z-50 bg-white rounded-lg shadow-lg border border-black/10 py-1 min-w-[130px]">
+                <button
+                  onClick={() => {
+                    onVersionChange("original");
+                    setVersionDropdownOpen(false);
+                  }}
+                  className={`w-full px-3 py-1.5 text-left text-[12px] hover:bg-black/5 flex items-center justify-between ${
+                    dataVersion === "original" ? "text-[#08f]" : "text-[rgba(0,0,0,0.85)]"
+                  }`}
+                >
+                  <span style={{ fontWeight: 510 }}>Initial</span>
+                  <span className="text-[#8E8E93] text-[10px]">original</span>
+                </button>
+                <button
+                  onClick={() => {
+                    onVersionChange("current");
+                    setVersionDropdownOpen(false);
+                  }}
+                  className={`w-full px-3 py-1.5 text-left text-[12px] hover:bg-black/5 flex items-center justify-between ${
+                    dataVersion === "current" ? "text-[#08f]" : "text-[rgba(0,0,0,0.85)]"
+                  }`}
+                >
+                  <span style={{ fontWeight: 510 }}>Current</span>
+                  <span className="text-[#8E8E93] text-[10px]">transformed</span>
+                </button>
+              </div>
+            </>
+          )}
         </div>
         <div className="flex-1 flex items-center gap-1 bg-white rounded-full px-2 h-[24px] shadow-[0px_0px_0px_1px_rgba(0,0,0,0.08)]">
           <Search className="w-[13px] h-[13px] text-black" />

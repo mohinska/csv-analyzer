@@ -50,6 +50,7 @@ export default function App() {
   const [isDragging, setIsDragging] = useState(false);
   const [plots, setPlots] = useState<PlotData[]>([]);
   const [fullscreenPlot, setFullscreenPlot] = useState<{ path: string; title: string } | null>(null);
+  const [dataVersion, setDataVersion] = useState<"current" | "original">("current");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const dragCounterRef = useRef(0);
@@ -211,6 +212,7 @@ export default function App() {
     setFileInfo(null);
     setChatInput("");
     setPlots([]);
+    setDataVersion("current");
 
     // Create new session
     try {
@@ -388,7 +390,32 @@ export default function App() {
     if (!sessionId) return;
 
     try {
-      const response = await fetch(`/api/preview/${sessionId}`);
+      const response = await fetch(`/api/preview/${sessionId}?version=current`);
+      if (response.ok) {
+        const data = await response.json();
+        // Only update if viewing current version
+        if (dataVersion === "current") {
+          setFileInfo({
+            filename: data.filename,
+            row_count: data.row_count,
+            column_count: data.column_count,
+            columns: data.columns,
+            preview: data.preview,
+          });
+        }
+      }
+    } catch (error) {
+      console.error("Failed to refresh file info:", error);
+    }
+  };
+
+  // Switch between original and current version
+  const switchVersion = async (version: "current" | "original") => {
+    if (!sessionId) return;
+    setDataVersion(version);
+
+    try {
+      const response = await fetch(`/api/preview/${sessionId}?version=${version}`);
       if (response.ok) {
         const data = await response.json();
         setFileInfo({
@@ -400,7 +427,7 @@ export default function App() {
         });
       }
     } catch (error) {
-      console.error("Failed to refresh file info:", error);
+      console.error("Failed to switch version:", error);
     }
   };
 
@@ -604,7 +631,15 @@ export default function App() {
         {/* Content panel */}
         <GlassPanel className="flex-1">
           <div className="h-full overflow-auto custom-scrollbar">
-            {activeTab === "data" ? <DataTab fileInfo={fileInfo} /> : <PlotsTab plots={plots} />}
+            {activeTab === "data" ? (
+              <DataTab
+                fileInfo={fileInfo}
+                dataVersion={dataVersion}
+                onVersionChange={switchVersion}
+              />
+            ) : (
+              <PlotsTab plots={plots} />
+            )}
           </div>
         </GlassPanel>
       </div>
@@ -630,7 +665,7 @@ export default function App() {
             </div>
             {fileInfo && (
               <span className="text-[11px] text-[#8E8E93]">
-                {fileInfo.filename} · {fileInfo.row_count} rows
+                {fileInfo.filename}
               </span>
             )}
           </div>

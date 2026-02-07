@@ -176,10 +176,12 @@ async def generate_and_execute_query(
 async def get_data_preview(
     session_id: str,
     rows: int = 5,
+    version: str = "current",  # "current" or "original"
     session_mgr: SessionManager = Depends(get_session_manager),
 ):
-    """Get current data preview (for refreshing after transformations)."""
-    df = session_mgr.get_dataframe(session_id)
+    """Get data preview. Use version='original' for initial data, 'current' for transformed."""
+    use_current = version != "original"
+    df = session_mgr.get_dataframe(session_id, use_current=use_current)
     if df is None:
         raise HTTPException(status_code=404, detail="No data found for this session")
 
@@ -191,6 +193,7 @@ async def get_data_preview(
         "column_count": len(df.columns),
         "columns": df.columns.tolist(),
         "preview": df.head(rows).to_dict(orient="records"),
+        "version": version,
     }
 
 

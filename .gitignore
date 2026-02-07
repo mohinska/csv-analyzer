@@ -16,6 +16,7 @@ data/
 # Node
 node_modules/
 dist/
+build/
 
 # IDE
 .idea/
