@@ -22,7 +22,7 @@ PLANNER_TOOLS = [
     },
     {
         "name": "generate_query",
-        "description": "Generate and execute a pandas query to analyze the data. Returns the execution result.",
+        "description": "Generate and execute a SQL query (DuckDB) to analyze the data. Returns the execution result.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -69,6 +69,10 @@ PLANNER_TOOLS = [
                 "instructions": {
                     "type": "string",
                     "description": "Additional instructions for the plot (e.g., 'sort by value descending', 'top 10 only')"
+                },
+                "color": {
+                    "type": "string",
+                    "description": "Main color for the chart (CSS hex, e.g. '#3b82f6' for blue, '#ef4444' for red, '#22c55e' for green). Default is purple."
                 }
             },
             "required": ["plot_type", "title"]

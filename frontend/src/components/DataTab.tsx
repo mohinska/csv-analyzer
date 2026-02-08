@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { createPortal } from "react-dom";
-import { Search, ChevronDown, Upload, Loader2, Filter, X, Download } from "lucide-react";
+import { Search, ChevronDown, Upload, Loader2, Filter, X, Download, Maximize2 } from "lucide-react";
 
 interface FileInfo {
   filename: string;
@@ -15,11 +15,12 @@ interface DataTabProps {
   dataVersion: "current" | "original";
   onVersionChange: (version: "current" | "original") => void;
   sessionId: string | null;
+  onViewFullData?: () => void;
 }
 
 const RENDER_CHUNK = 200;
 
-export function DataTab({ fileInfo, dataVersion, onVersionChange, sessionId }: DataTabProps) {
+export function DataTab({ fileInfo, dataVersion, onVersionChange, sessionId, onViewFullData }: DataTabProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [sortColumn, setSortColumn] = useState<string | null>(null);
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
@@ -138,13 +139,9 @@ export function DataTab({ fileInfo, dataVersion, onVersionChange, sessionId }: D
   // If no file uploaded, show placeholder
   if (!fileInfo) {
     return (
-      <div className="flex flex-col h-full items-center justify-center gap-3 p-5">
-        <Upload className="w-10 h-10" style={{ color: '#a1a1aa' }} />
-        <p className="text-[13px] text-center" style={{ fontWeight: 510, color: '#a1a1aa' }}>
+      <div className="flex flex-col h-full items-center justify-center gap-1 p-5">
+        <p className="text-[12px] text-center" style={{ fontWeight: 470, color: '#71717a' }}>
           No data loaded
-        </p>
-        <p className="text-[11px] text-center" style={{ color: '#a1a1aa' }}>
-          Upload a CSV file to see your data here
         </p>
       </div>
     );
@@ -411,6 +408,19 @@ export function DataTab({ fileInfo, dataVersion, onVersionChange, sessionId }: D
               <Loader2 className="w-3 h-3 animate-spin" style={{ color: '#9333ea' }} />
               <span className="text-[10px]" style={{ color: '#a1a1aa' }}>Loading...</span>
             </div>
+          )}
+          {onViewFullData && (
+            <button
+              onClick={onViewFullData}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg transition-all hover:opacity-90"
+              style={{
+                backgroundColor: 'rgba(147,51,234,0.12)',
+                border: '1px solid rgba(147,51,234,0.25)',
+              }}
+            >
+              <Maximize2 className="w-3 h-3" style={{ color: '#e4e4e7' }} />
+              <span className="text-[10px]" style={{ fontWeight: 510, color: '#e4e4e7' }}>View Full</span>
+            </button>
           )}
           <button
             onClick={handleExportCsv}

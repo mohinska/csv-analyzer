@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Search, BarChart3, Download, Code, Check } from "lucide-react";
 import { MarkdownLatex } from "./MarkdownLatex";
-import { Chart, ChartConfig } from "./Chart";
+import { Chart, ChartConfig, ChartTheme } from "./Chart";
 
 export interface PlotData {
   id: number;
@@ -17,14 +17,15 @@ export interface PlotData {
 
 interface PlotsTabProps {
   plots: PlotData[];
+  plotThemes?: Record<number, ChartTheme>;
   onViewPlot?: (plot: PlotData) => void;
   onSavePlot?: (plot: PlotData) => void;
   onCopyCode?: (plot: PlotData) => void;
 }
 
-function PlotChart({ plot }: { plot: PlotData }) {
+function PlotChart({ plot, theme }: { plot: PlotData; theme?: ChartTheme }) {
   if (plot.chartConfig && plot.chartData && plot.chartData.length > 0) {
-    return <Chart config={plot.chartConfig} data={plot.chartData} thumbnail />;
+    return <Chart config={plot.chartConfig} data={plot.chartData} thumbnail theme={theme} />;
   }
 
   // Fallback placeholder
@@ -37,9 +38,11 @@ function PlotChart({ plot }: { plot: PlotData }) {
 
 function ExpandedPlot({
   plot,
+  theme,
   onCollapse,
 }: {
   plot: PlotData;
+  theme?: ChartTheme;
   onCollapse: () => void;
 }) {
   return (
@@ -51,9 +54,9 @@ function ExpandedPlot({
         {/* Chart */}
         <div
           className="w-full aspect-[4/3] rounded-[10px] overflow-hidden"
-          style={{ border: '1px solid rgba(147,51,234,0.12)', backgroundColor: '#161328' }}
+          style={{ border: '1px solid rgba(147,51,234,0.12)', backgroundColor: theme?.backgroundColor || '#161328' }}
         >
-          <PlotChart plot={plot} />
+          <PlotChart plot={plot} theme={theme} />
         </div>
 
         {/* Title */}
@@ -104,13 +107,35 @@ function ExpandedPlot({
   );
 }
 
+function generateFallbackCode(plot: PlotData): string {
+  const type = plot.chartConfig?.chart_type || "bar";
+  const x = plot.chartConfig?.x_key || "x";
+  const y = plot.chartConfig?.y_key || "y";
+  const title = plot.title.replace(/'/g, "\\'");
+  if (type === "heatmap") {
+    return `import pandas as pd\nimport seaborn as sns\nimport matplotlib.pyplot as plt\n\ndf = pd.read_csv('your_data.csv')\nfig, ax = plt.subplots(figsize=(10, 8))\ncorr = df.select_dtypes(include='number').corr()\nsns.heatmap(corr, annot=True, fmt='.2f', cmap='RdBu_r', center=0, vmin=-1, vmax=1, square=True, linewidths=0.5, ax=ax)\nax.set_title('${title}')\nplt.tight_layout()\nplt.show()`;
+  }
+  if (type === "histogram") {
+    return `import pandas as pd\nimport matplotlib.pyplot as plt\n\ndf = pd.read_csv('your_data.csv')\nfig, ax = plt.subplots(figsize=(10, 6))\nax.hist(df['${x}'].dropna(), bins=20, color='#9333ea', edgecolor='white', alpha=0.85)\nax.set_xlabel('${x}')\nax.set_ylabel('Count')\nax.set_title('${title}')\nplt.tight_layout()\nplt.show()`;
+  }
+  if (type === "scatter") {
+    return `import pandas as pd\nimport matplotlib.pyplot as plt\n\ndf = pd.read_csv('your_data.csv')\nfig, ax = plt.subplots(figsize=(10, 6))\nax.scatter(df['${x}'], df['${y}'], alpha=0.6, color='#9333ea')\nax.set_xlabel('${x}')\nax.set_ylabel('${y}')\nax.set_title('${title}')\nplt.tight_layout()\nplt.show()`;
+  }
+  if (type === "line") {
+    return `import pandas as pd\nimport matplotlib.pyplot as plt\n\ndf = pd.read_csv('your_data.csv')\nfig, ax = plt.subplots(figsize=(10, 6))\nax.plot(df['${x}'], df['${y}'], marker='o', markersize=3, color='#9333ea')\nax.set_xlabel('${x}')\nax.set_ylabel('${y}')\nax.set_title('${title}')\nplt.tight_layout()\nplt.show()`;
+  }
+  return `import pandas as pd\nimport matplotlib.pyplot as plt\n\ndf = pd.read_csv('your_data.csv')\ndata = df.groupby('${x}')['${y}'].sum().reset_index()\nfig, ax = plt.subplots(figsize=(10, 6))\nax.bar(data['${x}'], data['${y}'], color='#9333ea')\nax.set_xlabel('${x}')\nax.set_ylabel('${y}')\nax.set_title('${title}')\nplt.tight_layout()\nplt.show()`;
+}
+
 function PlotCard({
   plot,
+  theme,
   onView,
   onSave,
   onCopyCode,
 }: {
   plot: PlotData;
+  theme?: ChartTheme;
   onView: () => void;
   onSave?: () => void;
   onCopyCode?: () => void;
@@ -118,8 +143,8 @@ function PlotCard({
   const [codeCopied, setCodeCopied] = useState(false);
 
   const handleCopyCode = () => {
-    if (!plot.codeSnippet) return;
-    navigator.clipboard.writeText(plot.codeSnippet).then(() => {
+    const code = plot.codeSnippet || generateFallbackCode(plot);
+    navigator.clipboard.writeText(code).then(() => {
       setCodeCopied(true);
       setTimeout(() => setCodeCopied(false), 2000);
     });
@@ -135,9 +160,9 @@ function PlotCard({
         {/* Thumbnail */}
         <div
           className="w-[80px] h-[80px] shrink-0 rounded-[10px] overflow-hidden"
-          style={{ border: '1px solid rgba(147,51,234,0.12)', backgroundColor: '#161328' }}
+          style={{ border: '1px solid rgba(147,51,234,0.12)', backgroundColor: theme?.backgroundColor || '#161328' }}
         >
-          <PlotChart plot={plot} />
+          <PlotChart plot={plot} theme={theme} />
         </div>
 
         {/* Info */}
@@ -165,22 +190,20 @@ function PlotCard({
             >
               View
             </button>
-            {plot.codeSnippet && (
-              <button
-                onClick={handleCopyCode}
-                className="h-[24px] w-[24px] rounded-md flex items-center justify-center hover:opacity-90 transition-all"
-                style={{
-                  color: codeCopied ? '#22c55e' : '#a1a1aa',
-                  backgroundColor: codeCopied ? 'rgba(34,197,94,0.15)' : 'rgba(147,51,234,0.08)',
-                  border: `1px solid ${codeCopied ? 'rgba(34,197,94,0.3)' : 'rgba(147,51,234,0.2)'}`,
-                }}
-                onMouseEnter={(e) => { if (!codeCopied) { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.2)'; e.currentTarget.style.color = '#e4e4e7'; } }}
-                onMouseLeave={(e) => { if (!codeCopied) { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.08)'; e.currentTarget.style.color = '#a1a1aa'; } }}
-                title={codeCopied ? "Copied!" : "Copy Python code"}
-              >
-                {codeCopied ? <Check className="w-3 h-3" /> : <Code className="w-3 h-3" />}
-              </button>
-            )}
+            <button
+              onClick={handleCopyCode}
+              className="h-[24px] w-[24px] rounded-md flex items-center justify-center hover:opacity-90 transition-all"
+              style={{
+                color: codeCopied ? '#22c55e' : '#a1a1aa',
+                backgroundColor: codeCopied ? 'rgba(34,197,94,0.15)' : 'rgba(147,51,234,0.08)',
+                border: `1px solid ${codeCopied ? 'rgba(34,197,94,0.3)' : 'rgba(147,51,234,0.2)'}`,
+              }}
+              onMouseEnter={(e) => { if (!codeCopied) { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.2)'; e.currentTarget.style.color = '#e4e4e7'; } }}
+              onMouseLeave={(e) => { if (!codeCopied) { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.08)'; e.currentTarget.style.color = '#a1a1aa'; } }}
+              title={codeCopied ? "Copied!" : "Copy Python code"}
+            >
+              {codeCopied ? <Check className="w-3 h-3" /> : <Code className="w-3 h-3" />}
+            </button>
             {onSave && (
               <button
                 onClick={onSave}
@@ -204,7 +227,7 @@ function PlotCard({
   );
 }
 
-export function PlotsTab({ plots, onViewPlot, onSavePlot, onCopyCode }: PlotsTabProps) {
+export function PlotsTab({ plots, plotThemes, onViewPlot, onSavePlot, onCopyCode }: PlotsTabProps) {
   const [searchQuery, setSearchQuery] = useState("");
 
   const filteredPlots = plots.filter((plot) => {
@@ -266,6 +289,7 @@ export function PlotsTab({ plots, onViewPlot, onSavePlot, onCopyCode }: PlotsTab
             <PlotCard
               key={plot.id}
               plot={plot}
+              theme={plotThemes?.[plot.id]}
               onView={() => onViewPlot?.(plot)}
               onSave={onSavePlot ? () => onSavePlot(plot) : undefined}
               onCopyCode={onCopyCode ? () => onCopyCode(plot) : undefined}

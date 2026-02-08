@@ -14,31 +14,49 @@ from backend.llm.mock_llm import MockLLM
 from backend.config import get_settings, Settings
 from backend.services.session_manager import get_session_manager, SessionManager, _safe_json_dumps, _sanitize_preview
 from backend.services.query_executor import get_query_executor, QueryExecutor
+from backend.services.llm_judge import LLMJudge
+from backend.agents.prompt_polisher import PromptPolisher
 import pandas as pd
 
 router = APIRouter()
 
 
+def _pandas_to_sql_type(dtype: str) -> str:
+    """Map pandas dtype to approximate SQL type."""
+    dtype = str(dtype).lower()
+    if 'int' in dtype:
+        return 'INTEGER'
+    elif 'float' in dtype:
+        return 'DOUBLE'
+    elif 'bool' in dtype:
+        return 'BOOLEAN'
+    elif 'datetime' in dtype:
+        return 'TIMESTAMP'
+    else:
+        return 'VARCHAR'
+
+
 def _summarize_for_query(df: pd.DataFrame) -> str:
-    """Generate a minimal summary optimized for query generation."""
+    """Generate a minimal summary optimized for SQL query generation."""
     lines = []
-    lines.append("DataFrame info:")
-    lines.append(f"- Shape: {df.shape[0]} rows x {df.shape[1]} columns")
+    lines.append("Table: df")
+    lines.append(f"Rows: {len(df)}")
     lines.append("")
     lines.append("Columns:")
 
     for col in df.columns:
         dtype = str(df[col].dtype)
+        sql_type = _pandas_to_sql_type(dtype)
         if pd.api.types.is_numeric_dtype(df[col]):
             min_val = df[col].min()
             max_val = df[col].max()
-            lines.append(f"  - {col} ({dtype}): range [{min_val} to {max_val}]")
-        elif pd.api.types.is_categorical_dtype(df[col]) or df[col].nunique() <= 10:
+            lines.append(f"  - {col} ({sql_type}): range [{min_val} to {max_val}]")
+        elif df[col].nunique() <= 10:
             categories = df[col].dropna().unique().tolist()[:10]
-            lines.append(f"  - {col} ({dtype}): categories {categories}")
+            lines.append(f"  - {col} ({sql_type}): values {categories}")
         else:
             sample = str(df[col].dropna().iloc[0])[:30] if len(df[col].dropna()) > 0 else "N/A"
-            lines.append(f"  - {col} ({dtype}): e.g. \"{sample}\"")
+            lines.append(f"  - {col} ({sql_type}): e.g. \"{sample}\"")
 
     return "\n".join(lines)
 
@@ -461,12 +479,26 @@ async def chat(
     # Initialize components
     query_maker = QueryMaker(llm)
 
+    # Initialize LLM judge if enabled
+    settings = get_settings()
+    judge = None
+    if settings.judge_enabled and not settings.should_use_mock:
+        judge_llm = AnthropicLLM(
+            model=settings.judge_model,
+            api_key=settings.anthropic_api_key,
+        )
+        judge = LLMJudge(judge_llm)
+
+    # Initialize prompt polisher (uses same LLM)
+    polisher = PromptPolisher(llm) if not settings.should_use_mock else None
+
     # Create planner with all dependencies
-    # Planner validates results itself through its tool-use loop
     planner = PlannerAgent(
         llm=llm,
         query_maker=query_maker,
         query_executor=executor,
+        judge=judge,
+        prompt_polisher=polisher,
     )
 
     safe_print(f"[Routes] /chat called: session={request.session_id}, message='{request.message[:50]}...'")

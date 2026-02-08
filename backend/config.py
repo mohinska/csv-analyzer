@@ -12,6 +12,10 @@ class Settings(BaseSettings):
     classifier_model: str = "claude-haiku-4-5-20251001"
     use_mock_llm: bool = False  # Set to True for testing without API
 
+    # LLM Judge Settings
+    judge_enabled: bool = True
+    judge_model: str = "claude-haiku-4-5-20251001"
+
     # Server Settings
     host: str = "0.0.0.0"
     port: int = 8001

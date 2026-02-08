@@ -59,6 +59,47 @@ class PlotInfo(BaseModel):
     code_snippet: Optional[str] = None
 
 
+class AnswerType(str, Enum):
+    """Expected answer format, classified during prompt preprocessing."""
+    TEXT = "text"
+    CSV = "csv"       # Data transformation → returns modified DataFrame
+    SVG = "svg"       # Visualization → returns chart
+
+
+class PlannerState(BaseModel):
+    """Explicit state object for a planner run."""
+    # Input
+    user_message: str
+    data_summary: str = ""
+
+    # Preprocessing
+    prompt_type: Optional[str] = None
+    answer_type: AnswerType = AnswerType.TEXT
+    polished_prompt: Optional[str] = None
+
+    # Execution
+    query: Optional[str] = None
+    data_ver: int = 0
+    last_query_result: Optional[str] = None
+
+    # Results
+    chat_messages: list[str] = []
+    plots: list[dict] = []
+    query_results: list[str] = []
+
+    # Control
+    finished: bool = False
+    data_updated: bool = False
+    iteration: int = 0
+
+    # Metrics
+    run_metrics: list[dict] = []
+    judge_verdicts: list[dict] = []
+
+    class Config:
+        arbitrary_types_allowed = True
+
+
 class ChatRequest(BaseModel):
     """Request body for chat endpoint."""
     session_id: str

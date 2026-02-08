@@ -14,6 +14,15 @@ interface FileInfo {
   preview: Record<string, unknown>[];
 }
 
+interface JudgeVerdict {
+  relevance: number;
+  accuracy: number;
+  completeness: number;
+  verdict: "pass" | "warn" | "retry";
+  feedback: string;
+  turn?: boolean;
+}
+
 interface Message {
   id: number;
   role: "user" | "assistant" | "system";
@@ -23,6 +32,8 @@ interface Message {
   plotTitle?: string;
   chartConfig?: ChartConfig;
   chartData?: Record<string, unknown>[];
+  codeSnippet?: string;
+  judgeVerdict?: JudgeVerdict;
 }
 
 function GlassPanel({ children, className, style }: { children: React.ReactNode; className?: string; style?: React.CSSProperties }) {
@@ -66,7 +77,7 @@ export default function App() {
   const [fileInfo, setFileInfo] = useState<FileInfo | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [plots, setPlots] = useState<PlotData[]>([]);
-  const [fullscreenPlot, setFullscreenPlot] = useState<{ title: string; chartConfig: ChartConfig; chartData: Record<string, unknown>[]; codeSnippet?: string } | null>(null);
+  const [fullscreenPlot, setFullscreenPlot] = useState<{ title: string; chartConfig: ChartConfig; chartData: Record<string, unknown>[]; codeSnippet?: string; plotId: number } | null>(null);
   const [dataVersion, setDataVersion] = useState<"current" | "original">("current");
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [suggestions, setSuggestions] = useState<{ text: string; category: string }[]>([]);
@@ -76,7 +87,7 @@ export default function App() {
   const [mobileView, setMobileView] = useState<"chat" | "data" | "plots">("chat");
   const [isMobile, setIsMobile] = useState(false);
   const [copiedId, setCopiedId] = useState<number | null>(null);
-  const [chartTheme, setChartTheme] = useState<ChartTheme>({});
+  const [plotThemes, setPlotThemes] = useState<Record<number, ChartTheme>>({});
   const [featurePopup, setFeaturePopup] = useState<number | null>(null);
   const [codeCopiedModal, setCodeCopiedModal] = useState(false);
   const [exportPlot, setExportPlot] = useState<{ title: string; chartConfig: ChartConfig; chartData: Record<string, unknown>[] } | null>(null);
@@ -436,9 +447,11 @@ export default function App() {
         break;
 
       case "plot":
+        // Use shared stable ID for plots and messages
+        const plotMsgId = Date.now();
         // Add plot to plots array
         const plotData: PlotData = {
-          id: Date.now(),
+          id: plotMsgId,
           title: data.title as string,
           columnsUsed: (data.columns_used as string) || "",
           summary: (data.summary as string) || "",
@@ -453,12 +466,13 @@ export default function App() {
         setMessages((prev) => [
           ...prev,
           {
-            id: Date.now(),
+            id: plotMsgId,
             role: "system",
             text: data.title as string,
             plotTitle: data.title as string,
             chartConfig: data.chart_config as ChartConfig | undefined,
             chartData: data.chart_data as Record<string, unknown>[] | undefined,
+            codeSnippet: (data.code_snippet as string) || undefined,
           },
         ]);
         break;
@@ -481,6 +495,31 @@ export default function App() {
           },
         ]);
         break;
+
+      case "judge": {
+        const verdict: JudgeVerdict = {
+          relevance: data.relevance as number,
+          accuracy: data.accuracy as number,
+          completeness: data.completeness as number,
+          verdict: data.verdict as "pass" | "warn" | "retry",
+          feedback: data.feedback as string,
+          turn: data.turn as boolean | undefined,
+        };
+        // Attach judge verdict to the last assistant message
+        if (!verdict.turn) {
+          setMessages((prev) => {
+            const msgs = [...prev];
+            for (let i = msgs.length - 1; i >= 0; i--) {
+              if (msgs[i].role === "assistant") {
+                msgs[i] = { ...msgs[i], judgeVerdict: verdict };
+                break;
+              }
+            }
+            return msgs;
+          });
+        }
+        break;
+      }
 
       case "status":
         setStatusMessage(data.message as string);
@@ -730,6 +769,14 @@ Perform a comprehensive first-look analysis of this dataset. Use multiple short 
     }
   };
 
+  const getCodeSnippet = (codeSnippet?: string, title?: string, config?: ChartConfig): string => {
+    if (codeSnippet) return codeSnippet;
+    const type = config?.chart_type || "bar";
+    const x = config?.x_key || "x";
+    const y = config?.y_key || "y";
+    return `import pandas as pd\nimport matplotlib.pyplot as plt\n\ndf = pd.read_csv('your_data.csv')\nfig, ax = plt.subplots(figsize=(10, 6))\nax.${type === "scatter" ? "scatter" : type === "line" ? "plot" : "bar"}(df['${x}'], df['${y}'])\nax.set_title('${title || "Plot"}')\nplt.tight_layout()\nplt.show()`;
+  };
+
   // Save plot directly (off-screen render, no modal flash)
   const handleSavePlotFromPanel = async (plot: PlotData) => {
     if (!plot.chartConfig || !plot.chartData) return;
@@ -823,9 +870,13 @@ Perform a comprehensive first-look analysis of this dataset. Use multiple short 
 
   return (
     <div
-      className="flex fixed inset-0 overflow-hidden"
+      className="flex overflow-hidden"
       style={{
-        height: '100vh',
+        position: 'fixed',
+        top: 0,
+        right: 0,
+        bottom: 0,
+        left: 0,
         alignItems: 'stretch',
         backgroundColor: '#111111',
         flexDirection: isMobile ? 'column' : 'row',
@@ -898,11 +949,12 @@ Perform a comprehensive first-look analysis of this dataset. Use multiple short 
                   dataVersion={dataVersion}
                   onVersionChange={switchVersion}
                   sessionId={sessionId}
+                  onViewFullData={() => setShowFullData(true)}
                 />
               ) : (
-                <PlotsTab plots={plots} onViewPlot={(plot) => {
+                <PlotsTab plots={plots} plotThemes={plotThemes} onViewPlot={(plot) => {
                   if (plot.chartConfig && plot.chartData) {
-                    setFullscreenPlot({ title: plot.title, chartConfig: plot.chartConfig, chartData: plot.chartData, codeSnippet: plot.codeSnippet });
+                    setFullscreenPlot({ title: plot.title, chartConfig: plot.chartConfig, chartData: plot.chartData, codeSnippet: plot.codeSnippet, plotId: plot.id });
                   }
                 }} onSavePlot={(plot) => {
                   handleSavePlotFromPanel(plot);
@@ -924,11 +976,12 @@ Perform a comprehensive first-look analysis of this dataset. Use multiple short 
                   dataVersion={dataVersion}
                   onVersionChange={switchVersion}
                   sessionId={sessionId}
+                  onViewFullData={() => setShowFullData(true)}
                 />
               ) : (
-                <PlotsTab plots={plots} onViewPlot={(plot) => {
+                <PlotsTab plots={plots} plotThemes={plotThemes} onViewPlot={(plot) => {
                   if (plot.chartConfig && plot.chartData) {
-                    setFullscreenPlot({ title: plot.title, chartConfig: plot.chartConfig, chartData: plot.chartData, codeSnippet: plot.codeSnippet });
+                    setFullscreenPlot({ title: plot.title, chartConfig: plot.chartConfig, chartData: plot.chartData, codeSnippet: plot.codeSnippet, plotId: plot.id });
                   }
                 }} onSavePlot={(plot) => {
                   handleSavePlotFromPanel(plot);
@@ -946,7 +999,7 @@ Perform a comprehensive first-look analysis of this dataset. Use multiple short 
           {/* Title */}
           <div className="px-5 flex items-center justify-between" style={{ flexShrink: 0, marginBottom: 4 }}>
             <h2 className="text-[18px]" style={{ fontWeight: 590, color: '#e4e4e7' }}>
-              CSV Analyser
+              CSV Analyzer
             </h2>
             <div className="flex items-center gap-2">
               {fileInfo && (
@@ -981,7 +1034,7 @@ Perform a comprehensive first-look analysis of this dataset. Use multiple short 
               <div className="h-full flex flex-col items-center justify-center" style={{ padding: isMobile ? '16px' : '32px' }}>
                 <div style={{ maxWidth: 420, width: '100%', textAlign: 'center' }}>
                   <h1 style={{ fontSize: isMobile ? 22 : 26, fontWeight: 700, color: '#e4e4e7', marginBottom: 6 }}>
-                    CSV Analyser
+                    CSV Analyzer
                   </h1>
                   <p style={{ fontSize: 13, color: '#a1a1aa', marginBottom: 28, lineHeight: 1.5 }}>
                     {fileInfo
@@ -1187,33 +1240,55 @@ Perform a comprehensive first-look analysis of this dataset. Use multiple short 
                       >
                         <MarkdownLatex>{msg.text}</MarkdownLatex>
                       </div>
-                      {/* Copy button for assistant messages */}
+                      {/* Copy button + judge indicator for assistant messages */}
                       {msg.role === "assistant" && (
-                        <button
-                          onClick={() => handleCopyMessage(msg.id, msg.text)}
-                          className="opacity-0 group-hover:opacity-100 transition-opacity"
-                          style={{
-                            marginTop: 6,
-                            display: "flex",
-                            alignItems: "center",
-                            gap: 4,
-                            padding: "2px 8px",
-                            borderRadius: 6,
-                            backgroundColor: "transparent",
-                            border: "1px solid rgba(147,51,234,0.15)",
-                            color: "#a1a1aa",
-                            fontSize: 11,
-                            cursor: "pointer",
-                          }}
-                          onMouseEnter={(e) => e.currentTarget.style.backgroundColor = "rgba(147,51,234,0.1)"}
-                          onMouseLeave={(e) => e.currentTarget.style.backgroundColor = "transparent"}
-                        >
-                          {copiedId === msg.id ? (
-                            <><Check className="w-3 h-3" /> Copied</>
-                          ) : (
-                            <><Copy className="w-3 h-3" /> Copy</>
+                        <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity" style={{ marginTop: 6 }}>
+                          <button
+                            onClick={() => handleCopyMessage(msg.id, msg.text)}
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 4,
+                              padding: "2px 8px",
+                              borderRadius: 6,
+                              backgroundColor: "transparent",
+                              border: "1px solid rgba(147,51,234,0.15)",
+                              color: "#a1a1aa",
+                              fontSize: 11,
+                              cursor: "pointer",
+                            }}
+                            onMouseEnter={(e) => e.currentTarget.style.backgroundColor = "rgba(147,51,234,0.1)"}
+                            onMouseLeave={(e) => e.currentTarget.style.backgroundColor = "transparent"}
+                          >
+                            {copiedId === msg.id ? (
+                              <><Check className="w-3 h-3" /> Copied</>
+                            ) : (
+                              <><Copy className="w-3 h-3" /> Copy</>
+                            )}
+                          </button>
+                          {msg.judgeVerdict && (
+                            <div
+                              className="flex items-center gap-1.5"
+                              style={{ fontSize: 10, color: '#71717a' }}
+                              title={`Quality: ${msg.judgeVerdict.verdict}\nRelevance: ${msg.judgeVerdict.relevance}/10\nAccuracy: ${msg.judgeVerdict.accuracy}/10\nCompleteness: ${msg.judgeVerdict.completeness}/10\n${msg.judgeVerdict.feedback}`}
+                            >
+                              <div
+                                style={{
+                                  width: 6,
+                                  height: 6,
+                                  borderRadius: '50%',
+                                  backgroundColor:
+                                    msg.judgeVerdict.verdict === "pass" ? '#22c55e' :
+                                    msg.judgeVerdict.verdict === "warn" ? '#eab308' :
+                                    '#ef4444',
+                                }}
+                              />
+                              <span>
+                                {msg.judgeVerdict.relevance + msg.judgeVerdict.accuracy + msg.judgeVerdict.completeness}/30
+                              </span>
+                            </div>
                           )}
-                        </button>
+                        </div>
                       )}
                       {/* Inline chart */}
                       {msg.chartConfig && msg.chartData && msg.chartData.length > 0 && (
@@ -1221,14 +1296,16 @@ Perform a comprehensive first-look analysis of this dataset. Use multiple short 
                           <div
                             className="rounded-lg overflow-hidden cursor-pointer"
                             data-chart-id={msg.id}
-                            style={{ width: '100%', height: 280, backgroundColor: '#161328', border: '1px solid rgba(147,51,234,0.12)' }}
+                            style={{ width: '100%', height: 280, backgroundColor: plotThemes[msg.id]?.backgroundColor || '#161328', border: '1px solid rgba(147,51,234,0.12)' }}
                             onClick={() => setFullscreenPlot({
                               title: msg.plotTitle || "Plot",
                               chartConfig: msg.chartConfig!,
                               chartData: msg.chartData!,
+                              codeSnippet: msg.codeSnippet,
+                              plotId: msg.id,
                             })}
                           >
-                            <Chart config={msg.chartConfig} data={msg.chartData} />
+                            <Chart config={msg.chartConfig} data={msg.chartData} theme={plotThemes[msg.id]} />
                           </div>
                           <div className="flex gap-[5px] mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
                             <button
@@ -1251,10 +1328,33 @@ Perform a comprehensive first-look analysis of this dataset. Use multiple short 
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
+                                const code = getCodeSnippet(msg.codeSnippet, msg.plotTitle, msg.chartConfig);
+                                navigator.clipboard.writeText(code);
+                                setCopiedId(msg.id);
+                                setTimeout(() => setCopiedId(null), 2000);
+                              }}
+                              style={{
+                                display: "flex", alignItems: "center", gap: 4, padding: "2px 8px",
+                                borderRadius: 6, backgroundColor: copiedId === msg.id ? "rgba(34,197,94,0.1)" : "transparent",
+                                border: `1px solid ${copiedId === msg.id ? "rgba(34,197,94,0.3)" : "rgba(147,51,234,0.15)"}`,
+                                color: copiedId === msg.id ? "#22c55e" : "#a1a1aa",
+                                fontSize: 11, cursor: "pointer",
+                              }}
+                              onMouseEnter={(e) => { if (copiedId !== msg.id) e.currentTarget.style.backgroundColor = "rgba(147,51,234,0.1)"; }}
+                              onMouseLeave={(e) => { if (copiedId !== msg.id) e.currentTarget.style.backgroundColor = "transparent"; }}
+                            >
+                              {copiedId === msg.id ? <Check className="w-3 h-3" /> : <Code className="w-3 h-3" />}
+                              {copiedId === msg.id ? "Copied" : "Code"}
+                            </button>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
                                 setFullscreenPlot({
                                   title: msg.plotTitle || "Plot",
                                   chartConfig: msg.chartConfig!,
                                   chartData: msg.chartData!,
+                                  codeSnippet: msg.codeSnippet,
+                                  plotId: msg.id,
                                 });
                               }}
                               style={{
@@ -1352,20 +1452,8 @@ Perform a comprehensive first-look analysis of this dataset. Use multiple short 
                 )}
               </button>
             ) : (
-              /* File uploaded - show text input with upload button */
-              <div className="flex items-center gap-2.5">
-                <button
-                  onClick={handleFileAttach}
-                  disabled={isLoading}
-                  className="w-[36px] h-[36px] rounded-full flex items-center justify-center shrink-0 transition-all hover:opacity-90 disabled:opacity-50"
-                  style={{
-                    backgroundColor: 'rgba(147,51,234,0.12)',
-                    border: '1px solid rgba(147,51,234,0.25)',
-                  }}
-                  title="Upload new file"
-                >
-                  <Upload className="w-[15px] h-[15px]" style={{ color: '#a1a1aa' }} />
-                </button>
+              /* File uploaded - show text input */
+              <div className="flex items-center">
                 <div className="flex-1 flex items-center gap-0.5 rounded-full px-6 py-2.5" style={{ backgroundColor: '#1a1625', border: '1px solid rgba(113,113,122,0.3)' }}>
                   <input
                     type="text"
@@ -1636,7 +1724,7 @@ Perform a comprehensive first-look analysis of this dataset. Use multiple short 
             backgroundColor: 'rgba(0,0,0,0.7)',
             backdropFilter: 'blur(4px)',
           }}
-          onClick={() => { setFullscreenPlot(null); setChartTheme({}); }}
+          onClick={() => setFullscreenPlot(null)}
         >
           <div
             style={{
@@ -1669,31 +1757,30 @@ Perform a comprehensive first-look analysis of this dataset. Use multiple short 
                 {fullscreenPlot.title}
               </span>
               <div style={{ display: 'flex', gap: 8, flexShrink: 0, marginLeft: 12 }}>
-                {fullscreenPlot.codeSnippet && (
-                  <button
-                    onClick={() => {
-                      navigator.clipboard.writeText(fullscreenPlot.codeSnippet!);
-                      setCodeCopiedModal(true);
-                      setTimeout(() => setCodeCopiedModal(false), 2000);
-                    }}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 6,
-                      padding: '6px 14px',
-                      borderRadius: 8,
-                      backgroundColor: codeCopiedModal ? 'rgba(34,197,94,0.15)' : 'rgba(147,51,234,0.15)',
-                      color: codeCopiedModal ? '#22c55e' : '#e4e4e7',
-                      fontSize: 13,
-                      fontWeight: 510,
-                      border: `1px solid ${codeCopiedModal ? 'rgba(34,197,94,0.3)' : 'rgba(147,51,234,0.3)'}`,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    {codeCopiedModal ? <Check className="w-3.5 h-3.5" /> : <Code className="w-3.5 h-3.5" />}
-                    {codeCopiedModal ? 'Copied!' : 'Copy Code'}
-                  </button>
-                )}
+                <button
+                  onClick={() => {
+                    const code = getCodeSnippet(fullscreenPlot.codeSnippet, fullscreenPlot.title, fullscreenPlot.chartConfig);
+                    navigator.clipboard.writeText(code);
+                    setCodeCopiedModal(true);
+                    setTimeout(() => setCodeCopiedModal(false), 2000);
+                  }}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    padding: '6px 14px',
+                    borderRadius: 8,
+                    backgroundColor: codeCopiedModal ? 'rgba(34,197,94,0.15)' : 'rgba(147,51,234,0.15)',
+                    color: codeCopiedModal ? '#22c55e' : '#e4e4e7',
+                    fontSize: 13,
+                    fontWeight: 510,
+                    border: `1px solid ${codeCopiedModal ? 'rgba(34,197,94,0.3)' : 'rgba(147,51,234,0.3)'}`,
+                    cursor: 'pointer',
+                  }}
+                >
+                  {codeCopiedModal ? <Check className="w-3.5 h-3.5" /> : <Code className="w-3.5 h-3.5" />}
+                  {codeCopiedModal ? 'Copied!' : 'Copy Code'}
+                </button>
                 <button
                   onClick={handleSavePlotPng}
                   style={{
@@ -1714,7 +1801,7 @@ Perform a comprehensive first-look analysis of this dataset. Use multiple short 
                   Save PNG
                 </button>
                 <button
-                  onClick={() => { setFullscreenPlot(null); setChartTheme({}); }}
+                  onClick={() => setFullscreenPlot(null)}
                   style={{
                     display: 'flex',
                     alignItems: 'center',
@@ -1736,8 +1823,8 @@ Perform a comprehensive first-look analysis of this dataset. Use multiple short 
               </div>
             </div>
             {/* Chart */}
-            <div ref={plotExportRef} style={{ flex: isMobile ? undefined : 1, minHeight: isMobile ? 300 : 0, height: isMobile ? '60vw' : undefined, maxHeight: isMobile ? '65vh' : undefined, padding: 16, backgroundColor: chartTheme.backgroundColor || 'transparent' }}>
-              <Chart config={fullscreenPlot.chartConfig} data={fullscreenPlot.chartData} theme={chartTheme} />
+            <div ref={plotExportRef} style={{ flex: isMobile ? undefined : 1, minHeight: isMobile ? 300 : 0, height: isMobile ? '60vw' : undefined, maxHeight: isMobile ? '65vh' : undefined, padding: 16, backgroundColor: (plotThemes[fullscreenPlot.plotId]?.backgroundColor) || 'transparent' }}>
+              <Chart config={fullscreenPlot.chartConfig} data={fullscreenPlot.chartData} theme={plotThemes[fullscreenPlot.plotId] || {}} />
             </div>
             {/* Customization bar */}
             <div style={{
@@ -1757,13 +1844,13 @@ Perform a comprehensive first-look analysis of this dataset. Use multiple short 
                   {["#9333ea", "#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#ec4899", "#06b6d4"].map((c) => (
                     <button
                       key={c}
-                      onClick={() => setChartTheme((prev) => ({ ...prev, color: c }))}
+                      onClick={() => setPlotThemes((prev) => ({ ...prev, [fullscreenPlot.plotId]: { ...prev[fullscreenPlot.plotId], color: c } }))}
                       style={{
                         width: 20,
                         height: 20,
                         borderRadius: 6,
                         backgroundColor: c,
-                        border: (chartTheme.color || "#9333ea") === c ? '2px solid #fff' : '2px solid transparent',
+                        border: (plotThemes[fullscreenPlot.plotId]?.color || "#9333ea") === c ? '2px solid #fff' : '2px solid transparent',
                         cursor: 'pointer',
                         transition: 'border-color 0.15s',
                       }}
@@ -1772,8 +1859,8 @@ Perform a comprehensive first-look analysis of this dataset. Use multiple short 
                   <label style={{ position: 'relative', width: 20, height: 20 }}>
                     <input
                       type="color"
-                      value={chartTheme.color || "#9333ea"}
-                      onChange={(e) => setChartTheme((prev) => ({ ...prev, color: e.target.value }))}
+                      value={plotThemes[fullscreenPlot.plotId]?.color || "#9333ea"}
+                      onChange={(e) => setPlotThemes((prev) => ({ ...prev, [fullscreenPlot.plotId]: { ...prev[fullscreenPlot.plotId], color: e.target.value } }))}
                       style={{ position: 'absolute', inset: 0, opacity: 0, cursor: 'pointer', width: '100%', height: '100%' }}
                     />
                     <div style={{
@@ -1800,14 +1887,14 @@ Perform a comprehensive first-look analysis of this dataset. Use multiple short 
                   ].map((opt) => (
                     <button
                       key={opt.label}
-                      onClick={() => setChartTheme((prev) => ({ ...prev, backgroundColor: opt.value }))}
+                      onClick={() => setPlotThemes((prev) => ({ ...prev, [fullscreenPlot.plotId]: { ...prev[fullscreenPlot.plotId], backgroundColor: opt.value } }))}
                       title={opt.label}
                       style={{
                         width: 20,
                         height: 20,
                         borderRadius: 6,
                         backgroundColor: opt.bg,
-                        border: chartTheme.backgroundColor === opt.value ? '2px solid #9333ea' : opt.border,
+                        border: plotThemes[fullscreenPlot.plotId]?.backgroundColor === opt.value ? '2px solid #9333ea' : opt.border,
                         cursor: 'pointer',
                         transition: 'border-color 0.15s',
                       }}
@@ -1816,8 +1903,8 @@ Perform a comprehensive first-look analysis of this dataset. Use multiple short 
                   <label style={{ position: 'relative', width: 20, height: 20 }}>
                     <input
                       type="color"
-                      value={chartTheme.backgroundColor || "#1e1b2e"}
-                      onChange={(e) => setChartTheme((prev) => ({ ...prev, backgroundColor: e.target.value }))}
+                      value={plotThemes[fullscreenPlot.plotId]?.backgroundColor || "#1e1b2e"}
+                      onChange={(e) => setPlotThemes((prev) => ({ ...prev, [fullscreenPlot.plotId]: { ...prev[fullscreenPlot.plotId], backgroundColor: e.target.value } }))}
                       style={{ position: 'absolute', inset: 0, opacity: 0, cursor: 'pointer', width: '100%', height: '100%' }}
                     />
                     <div style={{

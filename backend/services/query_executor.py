@@ -1,20 +1,17 @@
 """
-Query Executor - safely executes generated pandas code.
+Query Executor - executes SQL queries against DataFrames using DuckDB.
+
+Replaces the previous exec()-based approach with declarative SQL,
+which is safer (no arbitrary code execution) and more reliable
+(LLMs generate SQL well).
 """
-import io
-import sys
-import builtins
+import re
 import traceback
 from typing import Any, Optional
 from dataclasses import dataclass
 import pandas as pd
 import numpy as np
-import matplotlib
-matplotlib.use('Agg')  # Non-interactive backend
-import matplotlib.pyplot as plt
-import seaborn as sns
-import scipy
-import scipy.stats
+import duckdb
 
 
 @dataclass
@@ -22,200 +19,171 @@ class ExecutionResult:
     """Result of code execution."""
     success: bool
     result: Any = None  # The actual result (DataFrame, value, etc.)
-    result_type: str = "unknown"  # "dataframe", "value", "figure", "none"
+    result_type: str = "unknown"  # "dataframe", "value", "none"
     result_preview: Optional[str] = None  # String representation
     error: Optional[str] = None
     stdout: Optional[str] = None
 
 
+# SQL statement types that are NOT allowed
+BLOCKED_STATEMENTS = re.compile(
+    r'\b(DROP|DELETE|INSERT|UPDATE|ALTER|CREATE|TRUNCATE|REPLACE|MERGE|GRANT|REVOKE|COPY)\b',
+    re.IGNORECASE,
+)
+
+
 class QueryExecutor:
     """
-    Safely executes pandas code in a restricted environment.
-    """
+    Executes SQL queries against pandas DataFrames via DuckDB.
 
-    # Allowed modules in the execution namespace
-    ALLOWED_MODULES = {
-        'pd': pd,
-        'np': np,
-        'pandas': pd,
-        'numpy': np,
-        'plt': plt,
-        'matplotlib': matplotlib,
-        'sns': sns,
-        'seaborn': sns,
-        'scipy': scipy,
-        'stats': scipy.stats,
-    }
+    The DataFrame is registered as a table named `df` so queries
+    can reference it directly: SELECT * FROM df WHERE age > 30
+    """
 
     def execute(self, code: str, df: pd.DataFrame) -> ExecutionResult:
         """
-        Execute pandas code against a DataFrame.
+        Execute a SQL query against a DataFrame.
 
         Args:
-            code: Python/pandas code to execute
-            df: The DataFrame to operate on
+            code: SQL query (SELECT/WITH only)
+            df: The DataFrame to query
 
         Returns:
             ExecutionResult with success status and result
         """
-        # Close any existing figures to prevent leaks
-        plt.close('all')
+        # Validate SQL safety
+        violation = self._validate_sql(code)
+        if violation:
+            return ExecutionResult(
+                success=False,
+                error=f"SQL safety violation: {violation}",
+            )
 
-        # Create namespace with everything (single dict for both globals and locals)
-        namespace = {
-            'df': df.copy(),  # Work on a copy to avoid side effects
-            **self.ALLOWED_MODULES,
-            '__builtins__': self._get_safe_builtins(),
-        }
-
-        # Capture stdout
-        old_stdout = sys.stdout
-        sys.stdout = captured_output = io.StringIO()
-
+        conn = None
         try:
-            # Execute the code with single namespace dict
-            exec(code, namespace, namespace)
+            conn = duckdb.connect()
+            conn.register('df', df)
 
-            stdout = captured_output.getvalue()
+            result_df = conn.execute(code).fetchdf()
 
-            # Check for result variable
-            if 'result' in namespace:
-                result = namespace['result']
-                return self._create_result(result, stdout)
+            # Determine result type
+            is_scalar = len(result_df) == 1 and len(result_df.columns) == 1
+            is_transformation = self._is_transformation(code, df, result_df)
 
-            # Check if df was modified
-            if 'df' in namespace:
-                new_df = namespace['df']
-                if not new_df.equals(df):
-                    return self._create_result(new_df, stdout, is_transformation=True)
-
-            # Check for figure
-            if 'fig' in namespace:
+            if is_scalar:
+                # Single value result
+                value = result_df.iloc[0, 0]
+                # Convert numpy types to Python native
+                if isinstance(value, (np.integer,)):
+                    value = int(value)
+                elif isinstance(value, (np.floating,)):
+                    value = float(value)
                 return ExecutionResult(
                     success=True,
-                    result=namespace['fig'],
-                    result_type="figure",
-                    stdout=stdout,
+                    result=value,
+                    result_type="value",
+                    result_preview=str(value),
                 )
-
-            # No explicit result
-            return ExecutionResult(
-                success=True,
-                result=None,
-                result_type="none",
-                result_preview="Code executed successfully (no return value)",
-                stdout=stdout,
-            )
+            elif is_transformation:
+                # Data transformation — return the new DataFrame
+                return ExecutionResult(
+                    success=True,
+                    result=result_df,
+                    result_type="dataframe",
+                    result_preview=(
+                        f"DataFrame with {len(result_df)} rows, "
+                        f"{len(result_df.columns)} columns\n"
+                        f"{result_df.head(10).to_string()}"
+                    ),
+                )
+            else:
+                # Query result (aggregation, filter preview, etc.)
+                return ExecutionResult(
+                    success=True,
+                    result=result_df,
+                    result_type="dataframe_query",
+                    result_preview=(
+                        f"DataFrame with {len(result_df)} rows, "
+                        f"{len(result_df.columns)} columns\n"
+                        f"{result_df.head(10).to_string()}"
+                    ),
+                )
 
         except Exception as e:
             error_msg = f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
             return ExecutionResult(
                 success=False,
                 error=error_msg,
-                stdout=captured_output.getvalue(),
             )
 
         finally:
-            sys.stdout = old_stdout
+            if conn:
+                conn.close()
 
-    def _create_result(
-        self,
-        result: Any,
-        stdout: str,
-        is_transformation: bool = False
-    ) -> ExecutionResult:
-        """Create ExecutionResult from a result value."""
-        if isinstance(result, pd.DataFrame):
-            return ExecutionResult(
-                success=True,
-                result=result,
-                result_type="dataframe" if is_transformation else "dataframe_query",
-                result_preview=f"DataFrame with {len(result)} rows, {len(result.columns)} columns\n{result.head(10).to_string()}",
-                stdout=stdout,
-            )
-        elif isinstance(result, pd.Series):
-            return ExecutionResult(
-                success=True,
-                result=result,
-                result_type="series",
-                result_preview=f"Series with {len(result)} items\n{result.head(10).to_string()}",
-                stdout=stdout,
-            )
-        elif isinstance(result, (int, float, np.integer, np.floating)):
-            return ExecutionResult(
-                success=True,
-                result=result,
-                result_type="value",
-                result_preview=str(result),
-                stdout=stdout,
-            )
-        elif isinstance(result, (list, dict)):
-            import json
-            return ExecutionResult(
-                success=True,
-                result=result,
-                result_type="collection",
-                result_preview=json.dumps(result, default=str, indent=2)[:1000],
-                stdout=stdout,
-            )
-        else:
-            return ExecutionResult(
-                success=True,
-                result=result,
-                result_type=type(result).__name__,
-                result_preview=str(result)[:1000],
-                stdout=stdout,
-            )
+    def _validate_sql(self, sql: str) -> Optional[str]:
+        """
+        Validate that SQL only contains safe statements (SELECT/WITH).
+        Returns violation description or None if safe.
+        """
+        # Strip comments and normalize
+        cleaned = re.sub(r'--.*$', '', sql, flags=re.MULTILINE)
+        cleaned = re.sub(r'/\*.*?\*/', '', cleaned, flags=re.DOTALL)
+        cleaned = cleaned.strip().rstrip(';').strip()
 
-    def _get_safe_builtins(self) -> dict:
-        """Return a restricted set of builtins based on the real builtins module."""
-        # Safe import function that only allows whitelisted modules
-        def safe_import(name, globals=None, locals=None, fromlist=(), level=0):
-            allowed = {
-                'matplotlib': matplotlib,
-                'matplotlib.pyplot': plt,
-                'seaborn': sns,
-                'pandas': pd,
-                'numpy': np,
-                'scipy': scipy,
-                'scipy.stats': scipy.stats,
-            }
-            if name in allowed:
-                return allowed[name]
-            # Handle "from X import Y" style
-            if name == 'matplotlib' and fromlist:
-                if 'pyplot' in fromlist:
-                    return matplotlib
-            if name == 'scipy' and fromlist:
-                if 'stats' in fromlist:
-                    return scipy
-            raise ImportError(f"Import of '{name}' is not allowed")
+        if not cleaned:
+            return "empty query"
 
-        # Start with safe subset of real builtins
-        safe_names = [
-            'True', 'False', 'None',
-            'abs', 'all', 'any', 'bool', 'dict', 'enumerate', 'filter',
-            'float', 'int', 'len', 'list', 'map', 'max', 'min', 'print',
-            'range', 'round', 'set', 'sorted', 'str', 'sum', 'tuple', 'zip',
-            'isinstance', 'type', 'getattr', 'setattr', 'hasattr',
-            'repr', 'slice', 'reversed', 'iter', 'next',
-            'object', 'property', 'staticmethod', 'classmethod',
-            'super', 'callable', 'format', 'chr', 'ord', 'hex', 'oct', 'bin',
-            'pow', 'divmod', 'hash', 'id', 'ascii', 'bytes', 'bytearray',
-            'memoryview', 'frozenset', 'complex',
-            'Exception', 'ValueError', 'TypeError', 'KeyError', 'IndexError',
-            'AttributeError', 'RuntimeError', 'StopIteration',
+        # Check for blocked statement types
+        match = BLOCKED_STATEMENTS.search(cleaned)
+        if match:
+            return f"statement type '{match.group()}' is not allowed"
+
+        # Must start with SELECT or WITH (after stripping)
+        first_word = cleaned.split()[0].upper()
+        if first_word not in ('SELECT', 'WITH'):
+            return f"query must start with SELECT or WITH, got '{first_word}'"
+
+        return None
+
+    def _is_transformation(
+        self, sql: str, original_df: pd.DataFrame, result_df: pd.DataFrame
+    ) -> bool:
+        """
+        Detect if the query result represents a data transformation
+        (i.e., the user wants to modify/replace the DataFrame).
+
+        Heuristics:
+        - Result has similar row count to original (within 50%)
+        - Result has all original columns plus possibly new ones
+        - SQL contains transformation hints (CASE WHEN, new column aliases)
+        """
+        sql_upper = sql.upper()
+
+        # Explicit transformation patterns in SQL
+        transform_hints = [
+            'SELECT *' in sql_upper and 'AS ' in sql_upper,  # SELECT *, expr AS new_col
+            'REPLACE(' in sql_upper,
+            'COALESCE(' in sql_upper and 'SELECT *' in sql_upper,
+            'CASE WHEN' in sql_upper and 'SELECT *' in sql_upper,
         ]
+        if any(transform_hints):
+            return True
 
-        safe = {}
-        for name in safe_names:
-            if hasattr(builtins, name):
-                safe[name] = getattr(builtins, name)
+        # If result has all original columns and similar row count, likely a transformation
+        orig_cols = set(original_df.columns)
+        result_cols = set(result_df.columns)
 
-        # Override __import__ with our safe version
-        safe['__import__'] = safe_import
+        has_all_original = orig_cols.issubset(result_cols)
+        has_new_cols = len(result_cols) > len(orig_cols)
+        similar_rows = (
+            len(result_df) >= len(original_df) * 0.5
+            and len(result_df) <= len(original_df) * 1.5
+        )
 
-        return safe
+        if has_all_original and has_new_cols and similar_rows:
+            return True
+
+        return False
 
 
 # Singleton instance

@@ -1,8 +1,8 @@
 """
-QueryMaker - LLM-based agent that generates all pandas and visualization code.
+QueryMaker - LLM-based agent that generates SQL queries (DuckDB) and visualization code.
 
 Responsibilities:
-1. Generate pandas queries for data transformations and aggregations
+1. Generate SQL queries for data transformations and aggregations
 2. Generate matplotlib/seaborn code for visualizations
 """
 import re
@@ -29,51 +29,59 @@ class GeneratedPlotCode(BaseModel):
 
 class QueryMaker:
     """
-    LLM-based code generator for pandas operations and visualizations.
+    LLM-based code generator for SQL queries (DuckDB) and visualizations.
 
     The Planner delegates all code generation to QueryMaker:
-    - Data queries (filter, aggregate, transform)
+    - Data queries via SQL (filter, aggregate, transform)
     - Visualization code (matplotlib/seaborn)
     """
 
-    QUERY_SYSTEM_PROMPT = """You are a pandas code generator. Your job is to translate natural language
-requests into valid pandas code.
+    QUERY_SYSTEM_PROMPT = """You are a SQL code generator for DuckDB.
+The data is in a table called `df`.
 
-IMPORTANT RULES:
-1. The DataFrame is already loaded as `df`
-2. Generate ONLY the code, no markdown, no explanations in the code block
-3. Use pandas best practices
-4. Handle potential errors (e.g., missing columns)
-5. For aggregations, assign result to `result` variable
-6. For transformations, modify `df` in place or assign to `df`
-7. Never use exec(), eval(), or import dangerous modules
-8. Keep code simple and readable
+RULES:
+- Write a single SELECT query (or WITH ... SELECT for complex queries)
+- Use DuckDB SQL syntax (supports window functions, CTEs, UNNEST, etc.)
+- For aggregations: SELECT the computed values
+- For transformations: SELECT *, new_col FROM df (return full modified table)
+- For filtering: SELECT * FROM df WHERE condition
+- For statistics: use DuckDB aggregate functions
+- NEVER use DROP, DELETE, INSERT, UPDATE, ALTER, CREATE
+- Column names with spaces or special chars must be double-quoted: "Column Name"
 
-AVAILABLE LIBRARIES (already imported):
-- `pd` / `pandas` — pandas
-- `np` / `numpy` — numpy
-- `scipy` — scipy (for statistical tests)
-- `stats` — scipy.stats (for distributions, tests, regression)
+DuckDB AGGREGATE FUNCTIONS:
+- avg(col), sum(col), count(*), min(col), max(col)
+- stddev_samp(col), var_samp(col) — standard deviation, variance
+- median(col), mode(col) — median, mode
+- percentile_cont(0.25) WITHIN GROUP (ORDER BY col) — quartiles
+- corr(x, y) — correlation
+- regr_slope(y, x), regr_intercept(y, x) — linear regression
+- skewness(col), kurtosis(col) — distribution shape
+- count_if(condition) — conditional count
 
-STATISTICAL CAPABILITIES:
-- Distributions: stats.norm, stats.t, stats.f, stats.chi2, stats.expon, stats.poisson, stats.binom, stats.uniform, stats.gamma, stats.beta, etc.
-- Tests: stats.ttest_ind, stats.ttest_1samp, stats.chi2_contingency, stats.f_oneway, stats.mannwhitneyu, stats.kruskal, stats.shapiro, stats.kstest, stats.pearsonr, stats.spearmanr
-- Regression: stats.linregress (simple), np.polyfit/np.polyval (polynomial)
-- For more complex regression, use numpy: np.linalg.lstsq
+DuckDB FUNCTIONS:
+- regexp_replace(col, pattern, replacement) — regex replace
+- strftime(col, format) — format dates
+- date_part('year', col) — extract date parts
+- round(col, decimals), abs(col), ln(col), exp(col)
+- CASE WHEN condition THEN value ELSE other END — conditional logic
+- COALESCE(col, default) — handle NULLs
+- CAST(col AS TYPE) — type conversion
 
-REGRESSION EXAMPLES:
-- Simple linear regression:
-  slope, intercept, r_value, p_value, std_err = stats.linregress(df['x'], df['y'])
-  result = f"y = {slope:.4f}*x + {intercept:.4f}, R² = {r_value**2:.4f}, p = {p_value:.4e}"
-
-- Polynomial regression:
-  coeffs = np.polyfit(df['x'].values, df['y'].values, deg=2)
-  result = f"Coefficients: {coeffs}"
+EXAMPLES:
+- Average: SELECT avg(salary) AS avg_salary FROM df
+- Group by: SELECT department, avg(salary) AS avg_sal FROM df GROUP BY department
+- Filter: SELECT * FROM df WHERE age > 30
+- Add column: SELECT *, salary * 12 AS annual_salary FROM df
+- Clean NULLs: SELECT * REPLACE(COALESCE(col, 0) AS col) FROM df
+- Correlation: SELECT corr(height, weight) AS correlation FROM df
+- Top N: SELECT * FROM df ORDER BY salary DESC LIMIT 10
+- Window: SELECT *, rank() OVER (PARTITION BY dept ORDER BY salary DESC) AS rnk FROM df
 
 RESPONSE FORMAT (JSON):
 {
-    "code": "result = df['column'].mean()",
-    "explanation": "Calculates the average of the 'column'",
+    "code": "SELECT avg(salary) AS avg_salary FROM df",
+    "explanation": "Calculates the average salary",
     "is_aggregation": true,
     "is_transformation": false
 }"""
@@ -118,30 +126,30 @@ Examples of good visualizations:
         context: Optional[str] = None,
     ) -> GeneratedQuery:
         """
-        Generate pandas code from intent description.
+        Generate a SQL query from intent description.
 
         Args:
             intent: What the user wants to do with the data
-            data_summary: Summary of the DataFrame schema and stats
+            data_summary: Summary of the table schema and stats
             context: Optional additional context (e.g., previous results)
 
         Returns:
-            GeneratedQuery with code, explanation, and type flags
+            GeneratedQuery with SQL code, explanation, and type flags
         """
-        prompt = f"""Data available:
+        prompt = f"""Table schema:
 {data_summary}
 
 User request: {intent}
 
 {f"Additional context: {context}" if context else ""}
 
-Generate pandas code to fulfill this request. Respond with JSON."""
+Generate a DuckDB SQL query to fulfill this request. Respond with JSON."""
 
         try:
             response = await self.llm.generate_json(prompt, self.QUERY_SYSTEM_PROMPT)
 
-            # Validate and clean the code
-            code = self._sanitize_code(response.get("code", ""))
+            # Validate and clean the SQL
+            code = self._sanitize_sql(response.get("code", ""))
 
             return GeneratedQuery(
                 code=code,
@@ -225,40 +233,24 @@ Respond with JSON."""
             print(f"[QueryMaker] Plot generation error: {e}")
             raise ValueError(f"Failed to generate plot code: {e}")
 
-    def _sanitize_code(self, code: str) -> str:
+    def _sanitize_sql(self, sql: str) -> str:
         """
-        Basic sanitization of generated pandas code.
-        Removes dangerous patterns.
+        Sanitize generated SQL: strip semicolons, block DDL/DML.
         """
-        lines = code.strip().split('\n')
-        safe_lines = []
+        # Strip trailing semicolons and whitespace
+        sql = sql.strip().rstrip(';').strip()
 
-        dangerous_patterns = [
-            r'import\s+os\b',
-            r'import\s+sys\b',
-            r'import\s+subprocess',
-            r'from\s+os\b',
-            r'from\s+sys\b',
-            r'exec\s*\(',
-            r'eval\s*\(',
-            r'open\s*\(',
-            r'__import__',
-            r'globals\s*\(',
-            r'locals\s*\(',
-            r'compile\s*\(',
-        ]
+        # Block dangerous statement types
+        blocked = re.compile(
+            r'\b(DROP|DELETE|INSERT|UPDATE|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|COPY)\b',
+            re.IGNORECASE,
+        )
+        match = blocked.search(sql)
+        if match:
+            print(f"[QueryMaker] Blocked dangerous SQL: {match.group()}")
+            raise ValueError(f"SQL contains forbidden statement: {match.group()}")
 
-        for line in lines:
-            is_safe = True
-            for pattern in dangerous_patterns:
-                if re.search(pattern, line, re.IGNORECASE):
-                    is_safe = False
-                    print(f"[QueryMaker] Removed dangerous line: {line}")
-                    break
-            if is_safe:
-                safe_lines.append(line)
-
-        return '\n'.join(safe_lines)
+        return sql
 
     def _sanitize_plot_code(self, code: str) -> str:
         """
