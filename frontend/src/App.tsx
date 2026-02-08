@@ -115,7 +115,7 @@ export default function App() {
       return;
     }
     setFullDataLoading(true);
-    fetch(`http://localhost:8001/api/preview/${sessionId}?rows=99999&version=${dataVersion}`)
+    fetch(`api/preview/${sessionId}?rows=99999&version=${dataVersion}`)
       .then(res => res.json())
       .then(data => {
         setFullDataRows(data.preview);
