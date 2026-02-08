@@ -26,6 +26,7 @@ class Settings(BaseSettings):
 
     # CORS
     cors_origins: list[str] = [
+        "http://localhost:3000",  # local dev
         "http://frontend:3000",  # inside Docker network
         "http://161.35.159.20:3000"  # external access
     ]
