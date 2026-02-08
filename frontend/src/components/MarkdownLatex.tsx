@@ -20,6 +20,8 @@ interface MarkdownLatexProps {
  * - `code`
  * - [link](url)
  * - - list items
+ * - | tables |
+ * - --- horizontal rules
  */
 export function MarkdownLatex({ children, className }: MarkdownLatexProps) {
   if (!children) return null;
@@ -47,8 +49,21 @@ function renderMarkdownTable(tableText: string): React.ReactNode {
   const dataLines = lines.slice(2);
   const rows = dataLines.map(parseCells);
 
+  // Detect alignment from separator row
+  const separatorCells = parseCells(lines[1]);
+  const alignments = separatorCells.map((cell) => {
+    if (cell.startsWith(":") && cell.endsWith(":")) return "center";
+    if (cell.endsWith(":")) return "right";
+    return "left";
+  });
+
   return (
-    <div className="my-2 overflow-x-auto" style={{ maxWidth: "100%" }}>
+    <div className="my-3 overflow-x-auto custom-scrollbar" style={{
+      maxWidth: "100%",
+      borderRadius: 10,
+      border: "1px solid rgba(147,51,234,0.15)",
+      backgroundColor: "rgba(15,13,25,0.4)",
+    }}>
       <table
         style={{
           borderCollapse: "collapse",
@@ -63,12 +78,16 @@ function renderMarkdownTable(tableText: string): React.ReactNode {
               <th
                 key={i}
                 style={{
-                  padding: "6px 10px",
-                  borderBottom: "1px solid rgba(147,51,234,0.25)",
-                  textAlign: "left",
+                  padding: "8px 14px",
+                  borderBottom: "2px solid rgba(147,51,234,0.2)",
+                  textAlign: (alignments[i] || "left") as "left" | "center" | "right",
                   fontWeight: 600,
-                  color: "#e4e4e7",
+                  color: "#c084fc",
                   whiteSpace: "nowrap",
+                  fontSize: "11px",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.5px",
+                  backgroundColor: "rgba(147,51,234,0.06)",
                 }}
               >
                 {cell}
@@ -78,18 +97,25 @@ function renderMarkdownTable(tableText: string): React.ReactNode {
         </thead>
         <tbody>
           {rows.map((row, ri) => (
-            <tr key={ri}>
+            <tr
+              key={ri}
+              style={{
+                backgroundColor: ri % 2 === 0 ? "transparent" : "rgba(147,51,234,0.03)",
+              }}
+            >
               {row.map((cell, ci) => (
                 <td
                   key={ci}
                   style={{
-                    padding: "4px 10px",
-                    borderBottom: "1px solid rgba(147,51,234,0.1)",
+                    padding: "6px 14px",
+                    borderBottom: "1px solid rgba(147,51,234,0.08)",
                     color: "#e4e4e7",
                     whiteSpace: "nowrap",
+                    textAlign: (alignments[ci] || "left") as "left" | "center" | "right",
+                    fontVariantNumeric: "tabular-nums",
                   }}
                 >
-                  {cell}
+                  {parseInlineMarkdown(cell)}
                 </td>
               ))}
             </tr>
@@ -203,12 +229,64 @@ function parseMarkdown(text: string): React.ReactNode[] {
       elements.push(<br />);
     }
 
+    // Horizontal rule
+    if (/^[-*_]{3,}\s*$/.test(line.trim())) {
+      elements.push(
+        <hr style={{
+          border: "none",
+          borderTop: "1px solid rgba(147,51,234,0.15)",
+          margin: "12px 0",
+        }} />
+      );
+      return;
+    }
+
+    // Headings (### h3, ## h2, # h1)
+    const headingMatch = line.match(/^(#{1,4})\s+(.+)/);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      const content = headingMatch[2];
+      const sizes: Record<number, { fontSize: number; fontWeight: number; marginTop: number }> = {
+        1: { fontSize: 18, fontWeight: 700, marginTop: 16 },
+        2: { fontSize: 16, fontWeight: 650, marginTop: 12 },
+        3: { fontSize: 14, fontWeight: 600, marginTop: 10 },
+        4: { fontSize: 13, fontWeight: 590, marginTop: 8 },
+      };
+      const style = sizes[level] || sizes[3];
+      elements.push(
+        <span className="block" style={{
+          fontSize: style.fontSize,
+          fontWeight: style.fontWeight,
+          color: "#f4f4f5",
+          marginTop: lineIndex === 0 ? 0 : style.marginTop,
+          marginBottom: 4,
+        }}>
+          {parseInlineMarkdown(content)}
+        </span>
+      );
+      return;
+    }
+
     // Check for list items
     if (line.match(/^[-*]\s+/)) {
       const content = line.replace(/^[-*]\s+/, "");
       elements.push(
         <span className="block pl-4">
-          <span className="inline-block w-2 mr-2">•</span>
+          <span style={{ color: "#9333ea", marginRight: 10, display: "inline-block" }}>•</span>
+          {parseInlineMarkdown(content)}
+        </span>
+      );
+      return;
+    }
+
+    // Check for indented list items (  - item)
+    const indentedListMatch = line.match(/^(\s{2,})[-*]\s+/);
+    if (indentedListMatch) {
+      const indent = Math.floor(indentedListMatch[1].length / 2);
+      const content = line.replace(/^\s+[-*]\s+/, "");
+      elements.push(
+        <span className="block" style={{ paddingLeft: 16 + indent * 12 }}>
+          <span style={{ color: "#7c3aed", marginRight: 10, display: "inline-block" }}>◦</span>
           {parseInlineMarkdown(content)}
         </span>
       );
@@ -221,7 +299,7 @@ function parseMarkdown(text: string): React.ReactNode[] {
       const content = line.replace(/^\d+\.\s+/, "");
       elements.push(
         <span className="block pl-4">
-          <span className="inline-block w-4 mr-1">{numberedMatch[1]}.</span>
+          <span style={{ color: "#9333ea", fontWeight: 600, marginRight: 10, display: "inline-block" }}>{numberedMatch[1]}.</span>
           {parseInlineMarkdown(content)}
         </span>
       );
@@ -242,10 +320,18 @@ function parseInlineMarkdown(text: string): React.ReactNode[] {
   // Combined regex for markdown patterns
   // Order matters: bold before italic
   const patterns = [
-    { regex: /\*\*([^*]+)\*\*/g, render: (content: string) => <strong>{content}</strong> },
+    { regex: /\*\*([^*]+)\*\*/g, render: (content: string) => <strong style={{ fontWeight: 600, color: "#f4f4f5" }}>{content}</strong> },
     { regex: /\*([^*]+)\*/g, render: (content: string) => <em>{content}</em> },
     { regex: /`([^`]+)`/g, render: (content: string) => (
-      <code className="bg-black/5 px-1 py-0.5 rounded text-[13px] font-mono">{content}</code>
+      <code style={{
+        backgroundColor: "rgba(147,51,234,0.1)",
+        border: "1px solid rgba(147,51,234,0.15)",
+        padding: "1px 5px",
+        borderRadius: 4,
+        fontSize: "12px",
+        fontFamily: "monospace",
+        color: "#c084fc",
+      }}>{content}</code>
     )},
     { regex: /\[([^\]]+)\]\(([^)]+)\)/g, render: (content: string, url: string) => (
       <a href={url} className="text-blue-600 hover:underline" target="_blank" rel="noopener noreferrer">
@@ -260,7 +346,6 @@ function parseInlineMarkdown(text: string): React.ReactNode[] {
   for (const pattern of patterns) {
     if (pattern.regex.test(currentText)) {
       processed = true;
-      const parts = currentText.split(pattern.regex);
 
       // Reset regex lastIndex
       pattern.regex.lastIndex = 0;

@@ -1,10 +1,10 @@
 import { useState, useRef, useEffect } from "react";
 import { createPortal } from "react-dom";
-import { ArrowUp, TableProperties, BarChart3, FileText, Loader2, Upload, SquarePen, X } from "lucide-react";
+import { ArrowUp, TableProperties, BarChart3, FileText, Loader2, Upload, SquarePen, X, MessageCircle, Square, Copy, Check, Download, Sparkles, Shield, Filter, FlaskConical } from "lucide-react";
 import { DataTab } from "./components/DataTab";
 import { PlotsTab, PlotData } from "./components/PlotsTab";
 import { MarkdownLatex } from "./components/MarkdownLatex";
-import { Chart, ChartConfig } from "./components/Chart";
+import { Chart, ChartConfig, ChartTheme } from "./components/Chart";
 
 interface FileInfo {
   filename: string;
@@ -73,11 +73,27 @@ export default function App() {
   const [showFullData, setShowFullData] = useState(false);
   const [fullDataRows, setFullDataRows] = useState<Record<string, unknown>[] | null>(null);
   const [fullDataLoading, setFullDataLoading] = useState(false);
+  const [mobileView, setMobileView] = useState<"chat" | "data" | "plots">("chat");
+  const [isMobile, setIsMobile] = useState(false);
+  const [copiedId, setCopiedId] = useState<number | null>(null);
+  const [chartTheme, setChartTheme] = useState<ChartTheme>({});
+  const [featurePopup, setFeaturePopup] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const plotExportRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const dragCounterRef = useRef(0);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   const hasContent = chatInput.trim().length > 0;
+
+  // Detect mobile viewport
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 768px)");
+    setIsMobile(mq.matches);
+    const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches);
+    mq.addEventListener("change", handler);
+    return () => mq.removeEventListener("change", handler);
+  }, []);
 
   // Close fullscreen data on Escape
   useEffect(() => {
@@ -326,8 +342,11 @@ export default function App() {
   };
 
   // Send chat message via SSE stream
-  const sendChatMessage = async (message: string): Promise<void> => {
+  const sendChatMessage = async (message: string, internal = false): Promise<void> => {
     if (!sessionId) return;
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
 
     const response = await fetch("/api/chat", {
       method: "POST",
@@ -336,7 +355,9 @@ export default function App() {
         session_id: sessionId,
         message,
         stream: true,
+        internal,
       }),
+      signal: controller.signal,
     });
 
     if (!response.ok) {
@@ -349,31 +370,51 @@ export default function App() {
 
     const decoder = new TextDecoder();
     let buffer = "";
+    let receivedResponse = false;
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      buffer += decoder.decode(value, { stream: true });
+        buffer += decoder.decode(value, { stream: true });
 
-      // Parse SSE events
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
+        // Parse SSE events
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
 
-      let currentEvent = "";
-      for (const line of lines) {
-        if (line.startsWith("event: ")) {
-          currentEvent = line.slice(7);
-        } else if (line.startsWith("data: ") && currentEvent) {
-          try {
-            const data = JSON.parse(line.slice(6));
-            handleSSEEvent(currentEvent, data);
-          } catch {
-            // Ignore parse errors
+        let currentEvent = "";
+        for (const line of lines) {
+          if (line.startsWith("event: ")) {
+            currentEvent = line.slice(7);
+          } else if (line.startsWith("data: ") && currentEvent) {
+            try {
+              const data = JSON.parse(line.slice(6));
+              if (currentEvent === "text" || currentEvent === "plot" || currentEvent === "error") {
+                receivedResponse = true;
+              }
+              handleSSEEvent(currentEvent, data);
+            } catch {
+              // Ignore parse errors
+            }
+            currentEvent = "";
           }
-          currentEvent = "";
         }
       }
+    } finally {
+      abortControllerRef.current = null;
+    }
+
+    // Safety net: if stream ended without any visible response, show fallback
+    if (!receivedResponse) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: Date.now(),
+          role: "assistant",
+          text: "I wasn't able to produce a response. Please try rephrasing your question.",
+        },
+      ]);
     }
   };
 
@@ -426,8 +467,15 @@ export default function App() {
         break;
 
       case "error":
-        // Log errors to console only, don't show to user
         console.error("[Chat Error]", data.message);
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: Date.now(),
+            role: "assistant",
+            text: "Something went wrong while processing your request. Please try again or rephrase your question.",
+          },
+        ]);
         break;
 
       case "status":
@@ -439,6 +487,10 @@ export default function App() {
         // Refresh data if updated
         if (data.data_updated) {
           refreshFileInfo();
+        }
+        // Show follow-up suggestions
+        if (data.suggestions && Array.isArray(data.suggestions) && data.suggestions.length > 0) {
+          setSuggestions(data.suggestions as { text: string; category: string }[]);
         }
         break;
     }
@@ -526,7 +578,25 @@ export default function App() {
 
         // Auto-request data summary from the Planner
         try {
-          await sendChatMessage(`Summarize this dataset: ${data.filename} (${data.row_count} rows, ${data.column_count} columns). Give a brief overview of the data.`);
+          await sendChatMessage(`Analyze this dataset: ${data.filename} (${data.row_count} rows, ${data.column_count} columns).
+
+Do this step by step using multiple messages:
+
+1. First message: brief overview — what this data is about, what each row represents, the domain.
+
+2. Run queries to get column info and statistics, then share a Column Dictionary as a markdown table:
+| # | Column | Type | Description | Example Values |
+|--:|--------|------|-------------|----------------|
+
+3. Run queries for key statistics, then share a stats table for numeric columns:
+| Variable | Min | Max | Mean | Median | Missing |
+|----------|----:|----:|-----:|-------:|--------:|
+
+4. Data quality check — investigate and report: missing values, duplicates, type issues, anomalies. Use tables.
+
+5. Key insights — 2-3 dense observations about patterns or interesting findings. Formulate 1 hypothesis worth investigating.
+
+Create 1 chart max — only the single most interesting visualization for this data.`, true);
         } catch (error) {
           // Fallback to simple system message if chat fails
           console.error("Auto-summary failed:", error);
@@ -561,25 +631,37 @@ export default function App() {
     setIsLoading(false);
   };
 
-  const handleSend = async () => {
-    // Can only send text queries after file is uploaded
-    if (!chatInput.trim() || !fileInfo || isLoading) return;
+  const handleStop = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    setIsLoading(false);
+    setStatusMessage(null);
+  };
+
+  const handleSend = async (directText?: string) => {
+    const text = directText?.trim() || chatInput.trim();
+    if (!text || !fileInfo || isLoading) return;
 
     const userMessage: Message = {
       id: Date.now(),
       role: "user",
-      text: chatInput.trim(),
+      text,
     };
 
     setMessages((prev) => [...prev, userMessage]);
     setSuggestions([]);
-    const currentInput = chatInput.trim();
     setChatInput("");
     setIsLoading(true);
 
     try {
-      await sendChatMessage(currentInput);
+      await sendChatMessage(text);
     } catch (error) {
+      // Ignore abort errors (user clicked stop)
+      if (error instanceof DOMException && error.name === "AbortError") {
+        return;
+      }
       console.error("[Send Error]", error);
       setMessages((prev) => [
         ...prev,
@@ -593,6 +675,77 @@ export default function App() {
       setIsLoading(false);
       setStatusMessage(null);
     }
+  };
+
+  const handleCopyMessage = async (msgId: number, text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedId(msgId);
+      setTimeout(() => setCopiedId(null), 2000);
+    } catch {
+      // Fallback
+    }
+  };
+
+  const handleSavePlotPng = async () => {
+    const el = plotExportRef.current;
+    if (!el) return;
+    try {
+      const { default: html2canvas } = await import("html2canvas");
+      const canvas = await html2canvas(el, { backgroundColor: "#1e1b2e", scale: 2 });
+      const link = document.createElement("a");
+      link.download = `${fullscreenPlot?.title || "plot"}.png`;
+      link.href = canvas.toDataURL("image/png");
+      link.click();
+    } catch {
+      // html2canvas not available — fallback to SVG export
+      const svg = el.querySelector("svg");
+      if (!svg) return;
+      const svgData = new XMLSerializer().serializeToString(svg);
+      const svgBlob = new Blob([svgData], { type: "image/svg+xml;charset=utf-8" });
+      const link = document.createElement("a");
+      link.download = `${fullscreenPlot?.title || "plot"}.svg`;
+      link.href = URL.createObjectURL(svgBlob);
+      link.click();
+      URL.revokeObjectURL(link.href);
+    }
+  };
+
+  // Direct save: capture chart element from DOM and download as PNG
+  const handleDirectSavePlot = async (title: string, chartElement: HTMLElement | null) => {
+    if (!chartElement) return;
+    try {
+      const { default: html2canvas } = await import("html2canvas");
+      const canvas = await html2canvas(chartElement, { backgroundColor: "#161328", scale: 2 });
+      const link = document.createElement("a");
+      link.download = `${title}.png`;
+      link.href = canvas.toDataURL("image/png");
+      link.click();
+    } catch {
+      // Fallback: try SVG export
+      const svg = chartElement.querySelector("svg");
+      if (svg) {
+        const svgData = new XMLSerializer().serializeToString(svg);
+        const svgBlob = new Blob([svgData], { type: "image/svg+xml;charset=utf-8" });
+        const link = document.createElement("a");
+        link.download = `${title}.svg`;
+        link.href = URL.createObjectURL(svgBlob);
+        link.click();
+        URL.revokeObjectURL(link.href);
+      }
+    }
+  };
+
+  // Save plot from PlotsTab (opens fullscreen briefly, captures, auto-closes)
+  const handleSavePlotFromPanel = async (plot: PlotData) => {
+    if (!plot.chartConfig || !plot.chartData) return;
+    setFullscreenPlot({ title: plot.title, chartConfig: plot.chartConfig, chartData: plot.chartData });
+    // Wait for render, then save and close
+    setTimeout(async () => {
+      await handleSavePlotPng();
+      setFullscreenPlot(null);
+      setChartTheme({});
+    }, 600);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -648,7 +801,7 @@ export default function App() {
     if (files && files.length > 0) {
       const file = files[0];
       // Only accept CSV files
-      if (file.name.endsWith(".csv") || file.type === "text/csv") {
+      if (file.name.endsWith(".csv") || file.name.endsWith(".parquet") || file.name.endsWith(".pq") || file.type === "text/csv") {
         handleFileUpload(file);
       }
     }
@@ -656,8 +809,15 @@ export default function App() {
 
   return (
     <div
-      className="flex gap-3 px-1.5 py-2.5 fixed inset-0 overflow-hidden"
-      style={{ height: '100vh', alignItems: 'stretch', backgroundColor: '#111111' }}
+      className="flex fixed inset-0 overflow-hidden"
+      style={{
+        height: '100vh',
+        alignItems: 'stretch',
+        backgroundColor: '#111111',
+        flexDirection: isMobile ? 'column' : 'row',
+        gap: isMobile ? 0 : 12,
+        padding: isMobile ? 0 : '16px 14px',
+      }}
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}
       onDragOver={handleDragOver}
@@ -669,7 +829,7 @@ export default function App() {
           <div className="rounded-2xl px-8 py-6 shadow-xl border-2 border-dashed flex flex-col items-center gap-3" style={{ backgroundColor: '#252131', borderColor: '#9333ea' }}>
             <Upload className="w-10 h-10" style={{ color: '#9333ea' }} />
             <p className="text-[15px]" style={{ fontWeight: 590, color: '#e4e4e7' }}>
-              Drop CSV file here
+              Drop CSV or Parquet file here
             </p>
             <p className="text-[12px]" style={{ color: '#a1a1aa' }}>
               {fileInfo ? "This will replace the current file" : "Release to upload"}
@@ -678,64 +838,99 @@ export default function App() {
         </div>
       )}
 
-      {/* Left sidebar */}
-      <div className="flex flex-col gap-1.5 w-[340px] shrink-0 h-full min-w-0">
-        {/* Tab bar */}
-        <GlassPanel className="shrink-0" style={{ backgroundColor: '#111111' }}>
-          <div className="flex items-center py-2.5 px-2.5">
-            <button
-              onClick={() => setActiveTab("data")}
-              className="flex-1 h-[24px] flex items-center justify-center gap-1.5 rounded-lg px-2 transition-colors"
-              style={activeTab === "data" ? {
-                background: 'linear-gradient(135deg, rgba(147,51,234,0.5) 0%, rgba(107,33,168,0.6) 100%)',
-                border: '1px solid rgba(147,51,234,0.3)',
-                boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.08), 0 1px 3px rgba(0,0,0,0.2)',
-              } : { border: '1px solid transparent' }}
-            >
-              <TableProperties className="w-[14px] h-[14px]" style={{ color: activeTab === "data" ? '#fff' : '#a1a1aa' }} />
-              <span className="text-[11px]" style={{ fontWeight: 510, color: activeTab === "data" ? '#fff' : '#a1a1aa' }}>
-                Data
-              </span>
-            </button>
-            <button
-              onClick={() => setActiveTab("plots")}
-              className="flex-1 h-[24px] flex items-center justify-center gap-1.5 rounded-lg px-2 transition-all"
-              style={activeTab === "plots" ? {
-                background: 'linear-gradient(135deg, rgba(147,51,234,0.5) 0%, rgba(107,33,168,0.6) 100%)',
-                border: '1px solid rgba(147,51,234,0.3)',
-                boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.08), 0 1px 3px rgba(0,0,0,0.2)',
-              } : { border: '1px solid transparent' }}
-            >
-              <BarChart3 className="w-[14px] h-[14px]" style={{ color: activeTab === "plots" ? '#fff' : '#a1a1aa' }} />
-              <span className="text-[11px]" style={{ fontWeight: 510, color: activeTab === "plots" ? '#fff' : '#a1a1aa' }}>
-                Plots
-              </span>
-            </button>
-          </div>
-        </GlassPanel>
+      {/* Left sidebar — hidden on mobile */}
+      {!isMobile && (
+        <div className="flex flex-col gap-1.5 w-[340px] shrink-0 h-full min-w-0">
+          {/* Tab bar */}
+          <GlassPanel className="shrink-0" style={{ backgroundColor: '#111111' }}>
+            <div className="flex items-center py-2.5 px-2.5">
+              <button
+                onClick={() => setActiveTab("data")}
+                className="flex-1 h-[24px] flex items-center justify-center gap-1.5 rounded-lg px-2 transition-colors"
+                style={activeTab === "data" ? {
+                  background: 'linear-gradient(135deg, rgba(147,51,234,0.5) 0%, rgba(107,33,168,0.6) 100%)',
+                  border: '1px solid rgba(147,51,234,0.3)',
+                  boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.08), 0 1px 3px rgba(0,0,0,0.2)',
+                } : { border: '1px solid transparent' }}
+              >
+                <TableProperties className="w-[14px] h-[14px]" style={{ color: activeTab === "data" ? '#fff' : '#a1a1aa' }} />
+                <span className="text-[11px]" style={{ fontWeight: 510, color: activeTab === "data" ? '#fff' : '#a1a1aa' }}>
+                  Data
+                </span>
+              </button>
+              <button
+                onClick={() => setActiveTab("plots")}
+                className="flex-1 h-[24px] flex items-center justify-center gap-1.5 rounded-lg px-2 transition-all"
+                style={activeTab === "plots" ? {
+                  background: 'linear-gradient(135deg, rgba(147,51,234,0.5) 0%, rgba(107,33,168,0.6) 100%)',
+                  border: '1px solid rgba(147,51,234,0.3)',
+                  boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.08), 0 1px 3px rgba(0,0,0,0.2)',
+                } : { border: '1px solid transparent' }}
+              >
+                <BarChart3 className="w-[14px] h-[14px]" style={{ color: activeTab === "plots" ? '#fff' : '#a1a1aa' }} />
+                <span className="text-[11px]" style={{ fontWeight: 510, color: activeTab === "plots" ? '#fff' : '#a1a1aa' }}>
+                  Plots
+                </span>
+              </button>
+            </div>
+          </GlassPanel>
 
-        {/* Content panel */}
-        <GlassPanel className="flex-1">
-          <div className="h-full overflow-auto custom-scrollbar" style={{ backgroundColor: '#1e1b2e' }}>
-            {activeTab === "data" ? (
-              <DataTab
-                fileInfo={fileInfo}
-                dataVersion={dataVersion}
-                onVersionChange={switchVersion}
-                onExpandClick={() => setShowFullData(true)}
-              />
-            ) : (
-              <PlotsTab plots={plots} />
-            )}
-          </div>
-        </GlassPanel>
-      </div>
+          {/* Content panel */}
+          <GlassPanel className="flex-1">
+            <div className="h-full custom-scrollbar" style={{ backgroundColor: '#1e1b2e' }}>
+              {activeTab === "data" ? (
+                <DataTab
+                  fileInfo={fileInfo}
+                  dataVersion={dataVersion}
+                  onVersionChange={switchVersion}
+                  sessionId={sessionId}
+                />
+              ) : (
+                <PlotsTab plots={plots} onViewPlot={(plot) => {
+                  if (plot.chartConfig && plot.chartData) {
+                    setFullscreenPlot({ title: plot.title, chartConfig: plot.chartConfig, chartData: plot.chartData });
+                  }
+                }} onSavePlot={(plot) => {
+                  handleSavePlotFromPanel(plot);
+                }} onDeletePlot={(plotId) => setPlots((prev) => prev.filter((p) => p.id !== plotId))} />
+              )}
+            </div>
+          </GlassPanel>
+        </div>
+      )}
 
-      {/* Right panel */}
-      <GlassPanel className="flex-1 min-w-0" style={{ height: '100%' }}>
+      {/* Mobile: Data/Plots panel (shown when mobileView is data or plots) */}
+      {isMobile && mobileView !== "chat" && (
+        <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+          <GlassPanel className="flex-1" style={{ borderRadius: 0, border: 'none' }}>
+            <div className="h-full custom-scrollbar" style={{ backgroundColor: '#1e1b2e' }}>
+              {mobileView === "data" ? (
+                <DataTab
+                  fileInfo={fileInfo}
+                  dataVersion={dataVersion}
+                  onVersionChange={switchVersion}
+                  sessionId={sessionId}
+                />
+              ) : (
+                <PlotsTab plots={plots} onViewPlot={(plot) => {
+                  if (plot.chartConfig && plot.chartData) {
+                    setFullscreenPlot({ title: plot.title, chartConfig: plot.chartConfig, chartData: plot.chartData });
+                  }
+                }} onSavePlot={(plot) => {
+                  handleSavePlotFromPanel(plot);
+                }} onDeletePlot={(plotId) => setPlots((prev) => prev.filter((p) => p.id !== plotId))} />
+              )}
+            </div>
+          </GlassPanel>
+        </div>
+      )}
+
+      {/* Right panel (chat) — on mobile, only shown when mobileView is "chat" */}
+      {(!isMobile || mobileView === "chat") && (
+      <GlassPanel className="flex-1 min-w-0" style={{ height: '100%', ...(isMobile ? { borderRadius: 0, border: 'none' } : {}) }}>
         <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, paddingTop: '14px', paddingBottom: '14px' }}>
           {/* Title */}
-          <div className="px-5 flex items-center justify-between" style={{ flexShrink: 0 }}>
+          <div className="px-5 flex items-center justify-between" style={{ flexShrink: 0, marginBottom: 4 }}>
             <h2 className="text-[18px]" style={{ fontWeight: 590, color: '#e4e4e7' }}>
               CSV Analyser
             </h2>
@@ -769,13 +964,183 @@ export default function App() {
             style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}
           >
             {messages.length === 0 ? (
-              <div className="h-full flex flex-col items-center justify-center gap-2">
-                <p className="text-[13px]" style={{ fontWeight: 510, color: '#a1a1aa' }}>
-                  {fileInfo ? "Ask a question about your data" : "Upload a CSV file to get started"}
-                </p>
-                {!sessionId && (
-                  <p className="text-[11px]" style={{ color: '#a1a1aa' }}>Creating session...</p>
-                )}
+              <div className="h-full flex flex-col items-center justify-center" style={{ padding: isMobile ? '16px' : '32px' }}>
+                <div style={{ maxWidth: 420, width: '100%', textAlign: 'center' }}>
+                  <h1 style={{ fontSize: isMobile ? 22 : 26, fontWeight: 700, color: '#e4e4e7', marginBottom: 6 }}>
+                    CSV Analyser
+                  </h1>
+                  <p style={{ fontSize: 13, color: '#a1a1aa', marginBottom: 28, lineHeight: 1.5 }}>
+                    {fileInfo
+                      ? "Your data is ready. Ask anything below."
+                      : "Upload a CSV or Parquet file and explore your data with AI-powered analysis."
+                    }
+                  </p>
+
+                  {!fileInfo && (() => {
+                    const features = [
+                      {
+                        icon: <Sparkles className="w-[15px] h-[15px]" style={{ color: '#9333ea' }} />,
+                        text: "Auto-analysis on upload",
+                        details: "As soon as you upload a file, the AI automatically performs a comprehensive analysis: dataset overview, column dictionary with descriptions, key statistics, data quality report (missing values, duplicates, type issues, anomalies), and actionable insights.",
+                      },
+                      {
+                        icon: <FileText className="w-[15px] h-[15px]" style={{ color: '#9333ea' }} />,
+                        text: "Ask questions in natural language",
+                        details: "Ask anything about your data in plain language — in English or Ukrainian. \"What's the average salary by department?\", \"Show top 10 customers\", \"What drives revenue the most?\". The AI translates your questions into pandas code and interprets the results.",
+                      },
+                      {
+                        icon: <BarChart3 className="w-[15px] h-[15px]" style={{ color: '#9333ea' }} />,
+                        text: "Interactive charts & visualizations",
+                        details: "Generate bar charts, scatter plots, histograms, pie charts, box plots, and more. Every chart is interactive — click to view fullscreen, customize colors and background, and save as PNG. Charts are saved in the Plots tab for quick access.",
+                      },
+                      {
+                        icon: <Shield className="w-[15px] h-[15px]" style={{ color: '#9333ea' }} />,
+                        text: "Data quality & cleaning",
+                        details: "Automatic quality checks: missing values, duplicates, type mismatches, outliers, class imbalance. Ask to \"clean the data\" and the AI will fix types, remove duplicates, handle missing values, trim whitespace — all with a detailed before/after report.",
+                      },
+                      {
+                        icon: <Filter className="w-[15px] h-[15px]" style={{ color: '#9333ea' }} />,
+                        text: "Filter, sort & explore data",
+                        details: "The Data tab gives you per-column filters with search, sorting by any column, CSV export, and version switching between original and current data. See your data change in real-time as the AI transforms it.",
+                      },
+                      {
+                        icon: <FlaskConical className="w-[15px] h-[15px]" style={{ color: '#9333ea' }} />,
+                        text: "Statistical analysis & regression",
+                        details: "Run t-tests, ANOVA, chi-squared, normality tests, correlation analysis, linear and polynomial regression. The AI interprets results in plain language — p-values, R-squared, confidence intervals — and formulates hypotheses.",
+                      },
+                      {
+                        icon: <Upload className="w-[15px] h-[15px]" style={{ color: '#9333ea' }} />,
+                        text: "CSV & Parquet support",
+                        details: "Upload CSV or Apache Parquet files. Drag & drop or click to browse. Large datasets are handled efficiently with preview pagination and lazy loading.",
+                      },
+                    ];
+                    return (
+                      <>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, textAlign: 'left', marginBottom: 24 }}>
+                          {features.map((item, i) => (
+                            <button key={i} onClick={() => setFeaturePopup(i)} style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: 12,
+                              padding: '10px 14px',
+                              borderRadius: 12,
+                              backgroundColor: 'rgba(147,51,234,0.06)',
+                              border: '1px solid rgba(147,51,234,0.12)',
+                              cursor: 'pointer',
+                              transition: 'background-color 0.15s',
+                              width: '100%',
+                              textAlign: 'left',
+                            }}
+                              onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.12)'}
+                              onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.06)'}
+                            >
+                              {item.icon}
+                              <span style={{ fontSize: 13, color: '#e4e4e7', fontWeight: 450, flex: 1 }}>{item.text}</span>
+                              <span style={{ fontSize: 11, color: '#52525b' }}>&#8250;</span>
+                            </button>
+                          ))}
+                        </div>
+
+                        {/* Feature detail popup */}
+                        {featurePopup !== null && createPortal(
+                          <div
+                            style={{
+                              position: 'fixed',
+                              inset: 0,
+                              zIndex: 99999,
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              backgroundColor: 'rgba(0,0,0,0.6)',
+                              backdropFilter: 'blur(4px)',
+                            }}
+                            onClick={() => setFeaturePopup(null)}
+                          >
+                            <div
+                              style={{
+                                maxWidth: 420,
+                                width: 'calc(100% - 32px)',
+                                backgroundColor: '#1e1b2e',
+                                borderRadius: 16,
+                                border: '1px solid rgba(147,51,234,0.25)',
+                                boxShadow: '0 25px 60px rgba(0,0,0,0.5)',
+                                padding: '24px',
+                              }}
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
+                                {features[featurePopup].icon}
+                                <span style={{ fontSize: 16, fontWeight: 600, color: '#e4e4e7', flex: 1 }}>
+                                  {features[featurePopup].text}
+                                </span>
+                                <button
+                                  onClick={() => setFeaturePopup(null)}
+                                  style={{
+                                    width: 28,
+                                    height: 28,
+                                    borderRadius: 8,
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    backgroundColor: 'rgba(147,51,234,0.1)',
+                                    border: '1px solid rgba(147,51,234,0.2)',
+                                    cursor: 'pointer',
+                                    color: '#a1a1aa',
+                                    flexShrink: 0,
+                                  }}
+                                >
+                                  <X className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                              <p style={{ fontSize: 13, color: '#a1a1aa', lineHeight: 1.7, fontWeight: 400 }}>
+                                {features[featurePopup].details}
+                              </p>
+                            </div>
+                          </div>,
+                          document.body
+                        )}
+                      </>
+                    );
+                  })()}
+
+                  {fileInfo && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, textAlign: 'left' }}>
+                      <p style={{ fontSize: 11, color: '#52525b', marginBottom: 4, textAlign: 'center' }}>Try asking:</p>
+                      {[
+                        "Summarize the key statistics",
+                        "Show a distribution chart",
+                        "Are there any missing values?",
+                      ].map((hint, i) => (
+                        <button
+                          key={i}
+                          onClick={() => handleSend(hint)}
+                          style={{
+                            display: 'block',
+                            width: '100%',
+                            padding: '10px 14px',
+                            borderRadius: 12,
+                            backgroundColor: 'rgba(147,51,234,0.06)',
+                            border: '1px solid rgba(147,51,234,0.12)',
+                            color: '#e4e4e7',
+                            fontSize: 13,
+                            fontWeight: 450,
+                            textAlign: 'left',
+                            cursor: 'pointer',
+                            transition: 'background-color 0.15s',
+                          }}
+                          onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.12)'}
+                          onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.06)'}
+                        >
+                          {hint}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  {!sessionId && (
+                    <p style={{ fontSize: 11, color: '#a1a1aa', marginTop: 12 }}>Creating session...</p>
+                  )}
+                </div>
               </div>
             ) : (
               <div className="flex flex-col gap-3">
@@ -808,18 +1173,88 @@ export default function App() {
                       >
                         <MarkdownLatex>{msg.text}</MarkdownLatex>
                       </div>
+                      {/* Copy button for assistant messages */}
+                      {msg.role === "assistant" && (
+                        <button
+                          onClick={() => handleCopyMessage(msg.id, msg.text)}
+                          className="opacity-0 group-hover:opacity-100 transition-opacity"
+                          style={{
+                            marginTop: 6,
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 4,
+                            padding: "2px 8px",
+                            borderRadius: 6,
+                            backgroundColor: "transparent",
+                            border: "1px solid rgba(147,51,234,0.15)",
+                            color: "#a1a1aa",
+                            fontSize: 11,
+                            cursor: "pointer",
+                          }}
+                          onMouseEnter={(e) => e.currentTarget.style.backgroundColor = "rgba(147,51,234,0.1)"}
+                          onMouseLeave={(e) => e.currentTarget.style.backgroundColor = "transparent"}
+                        >
+                          {copiedId === msg.id ? (
+                            <><Check className="w-3 h-3" /> Copied</>
+                          ) : (
+                            <><Copy className="w-3 h-3" /> Copy</>
+                          )}
+                        </button>
+                      )}
                       {/* Inline chart */}
                       {msg.chartConfig && msg.chartData && msg.chartData.length > 0 && (
-                        <div
-                          className="mt-2 rounded-lg overflow-hidden cursor-pointer"
-                          style={{ width: '100%', height: 280, backgroundColor: '#161328', border: '1px solid rgba(147,51,234,0.12)' }}
-                          onClick={() => setFullscreenPlot({
-                            title: msg.plotTitle || "Plot",
-                            chartConfig: msg.chartConfig!,
-                            chartData: msg.chartData!,
-                          })}
-                        >
-                          <Chart config={msg.chartConfig} data={msg.chartData} />
+                        <div className="mt-2">
+                          <div
+                            className="rounded-lg overflow-hidden cursor-pointer"
+                            data-chart-id={msg.id}
+                            style={{ width: '100%', height: 280, backgroundColor: '#161328', border: '1px solid rgba(147,51,234,0.12)' }}
+                            onClick={() => setFullscreenPlot({
+                              title: msg.plotTitle || "Plot",
+                              chartConfig: msg.chartConfig!,
+                              chartData: msg.chartData!,
+                            })}
+                          >
+                            <Chart config={msg.chartConfig} data={msg.chartData} />
+                          </div>
+                          <div className="flex gap-[5px] mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const chartEl = document.querySelector(`[data-chart-id="${msg.id}"]`) as HTMLElement;
+                                handleDirectSavePlot(msg.plotTitle || "Plot", chartEl);
+                              }}
+                              style={{
+                                display: "flex", alignItems: "center", gap: 4, padding: "2px 8px",
+                                borderRadius: 6, backgroundColor: "transparent",
+                                border: "1px solid rgba(147,51,234,0.15)", color: "#a1a1aa",
+                                fontSize: 11, cursor: "pointer",
+                              }}
+                              onMouseEnter={(e) => e.currentTarget.style.backgroundColor = "rgba(147,51,234,0.1)"}
+                              onMouseLeave={(e) => e.currentTarget.style.backgroundColor = "transparent"}
+                            >
+                              <Download className="w-3 h-3" /> Save
+                            </button>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setFullscreenPlot({
+                                  title: msg.plotTitle || "Plot",
+                                  chartConfig: msg.chartConfig!,
+                                  chartData: msg.chartData!,
+                                });
+                              }}
+                              style={{
+                                display: "flex", alignItems: "center", gap: 4, padding: "2px 8px",
+                                borderRadius: 6, backgroundColor: "transparent",
+                                border: "1px solid rgba(147,51,234,0.15)", color: "#a1a1aa",
+                                fontSize: 11, cursor: "pointer",
+                              }}
+                              onMouseEnter={(e) => e.currentTarget.style.backgroundColor = "rgba(147,51,234,0.1)"}
+                              onMouseLeave={(e) => e.currentTarget.style.backgroundColor = "transparent"}
+                            >
+                              <BarChart3 className="w-3 h-3" /> Customize
+                            </button>
+                          </div>
                         </div>
                       )}
                     </div>
@@ -827,21 +1262,25 @@ export default function App() {
                 ))}
                 {/* Suggestion chips */}
                 {suggestions.length > 0 && !isLoading && (
-                  <div className="flex flex-wrap gap-2 mt-1">
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxWidth: 360, marginTop: 4 }}>
                     {suggestions.map((suggestion, idx) => (
                       <button
                         key={idx}
-                        onClick={() => {
-                          setChatInput(suggestion.text);
-                          setSuggestions([]);
-                        }}
-                        className="rounded-full px-3.5 py-1.5 text-[11px] transition-all hover:opacity-80"
+                        onClick={() => handleSend(suggestion.text)}
                         style={{
-                          fontWeight: 510,
+                          padding: '8px 14px',
+                          borderRadius: 12,
+                          backgroundColor: 'rgba(147,51,234,0.08)',
+                          border: '1px solid rgba(147,51,234,0.2)',
                           color: '#e4e4e7',
-                          backgroundColor: 'rgba(147,51,234,0.12)',
-                          border: '1px solid rgba(147,51,234,0.25)',
+                          fontSize: 12,
+                          fontWeight: 470,
+                          textAlign: 'left',
+                          cursor: 'pointer',
+                          transition: 'background-color 0.15s',
                         }}
+                        onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.15)'}
+                        onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.08)'}
                       >
                         {suggestion.text}
                       </button>
@@ -870,7 +1309,7 @@ export default function App() {
             <input
               ref={fileInputRef}
               type="file"
-              accept=".csv"
+              accept=".csv,.parquet,.pq"
               onChange={handleFileChange}
               className="hidden"
             />
@@ -893,7 +1332,7 @@ export default function App() {
                   <>
                     <Upload className="w-[15px] h-[15px]" style={{ color: '#fff' }} />
                     <span className="text-[13px]" style={{ fontWeight: 510, color: '#fff' }}>
-                      Upload CSV file
+                      Upload CSV or Parquet
                     </span>
                   </>
                 )}
@@ -912,13 +1351,17 @@ export default function App() {
                     style={{ fontWeight: 510, color: '#e4e4e7' }}
                   />
                   <button
-                    onClick={handleSend}
-                    disabled={!hasContent || isLoading}
+                    onClick={isLoading ? handleStop : handleSend}
+                    disabled={!isLoading && !hasContent}
                     className={`w-[36px] h-[36px] rounded-full flex items-center justify-center relative overflow-hidden shrink-0 transition-all duration-200 ${
-                      hasContent && !isLoading ? "cursor-pointer" : "cursor-default"
+                      isLoading || hasContent ? "cursor-pointer" : "cursor-default"
                     }`}
                   >
-                    <div className="absolute inset-0 rounded-full" style={hasContent && !isLoading ? {
+                    <div className="absolute inset-0 rounded-full" style={isLoading ? {
+                      background: 'linear-gradient(135deg, rgba(147,51,234,0.6) 0%, rgba(107,33,168,0.7) 100%)',
+                      border: '1px solid rgba(147,51,234,0.4)',
+                      boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.1)',
+                    } : hasContent ? {
                       background: 'linear-gradient(135deg, rgba(147,51,234,0.6) 0%, rgba(107,33,168,0.7) 100%)',
                       border: '1px solid rgba(147,51,234,0.4)',
                       boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.1)',
@@ -928,7 +1371,7 @@ export default function App() {
                       boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.05)',
                     }} />
                     {isLoading ? (
-                      <Loader2 className="w-[15px] h-[15px] relative z-10 animate-spin" style={{ color: '#a1a1aa' }} />
+                      <Square className="w-[12px] h-[12px] relative z-10" style={{ color: '#fff', fill: '#fff' }} />
                     ) : (
                       <ArrowUp
                         className="w-[15px] h-[15px] relative z-10 transition-colors duration-200"
@@ -942,6 +1385,7 @@ export default function App() {
           </div>
         </div>
       </GlassPanel>
+      )}
 
       {/* Fullscreen data modal — portalled to document.body to escape overflow:hidden */}
       {showFullData && fileInfo && createPortal(
@@ -961,13 +1405,13 @@ export default function App() {
           <div
             style={{
               position: 'relative',
-              width: '90vw',
-              height: '85vh',
-              maxWidth: 1200,
-              maxHeight: 800,
+              width: isMobile ? '100vw' : '90vw',
+              height: isMobile ? '100vh' : '85vh',
+              maxWidth: isMobile ? undefined : 1200,
+              maxHeight: isMobile ? undefined : 800,
               backgroundColor: '#1e1b2e',
-              borderRadius: 16,
-              border: '1px solid rgba(147,51,234,0.25)',
+              borderRadius: isMobile ? 0 : 16,
+              border: isMobile ? 'none' : '1px solid rgba(147,51,234,0.25)',
               boxShadow: '0 25px 60px rgba(0,0,0,0.5)',
               display: 'flex',
               flexDirection: 'column' as const,
@@ -1104,32 +1548,232 @@ export default function App() {
         document.body
       )}
 
+      {/* Mobile bottom navigation */}
+      {isMobile && (
+        <div style={{
+          flexShrink: 0,
+          display: 'flex',
+          backgroundColor: '#1e1b2e',
+          borderTop: '1px solid rgba(147,51,234,0.2)',
+          padding: '6px 0',
+          paddingBottom: 'max(6px, env(safe-area-inset-bottom))',
+        }}>
+          {[
+            { key: "chat" as const, icon: <MessageCircle className="w-[18px] h-[18px]" />, label: "Chat" },
+            { key: "data" as const, icon: <TableProperties className="w-[18px] h-[18px]" />, label: "Data" },
+            { key: "plots" as const, icon: <BarChart3 className="w-[18px] h-[18px]" />, label: "Plots" },
+          ].map((tab) => (
+            <button
+              key={tab.key}
+              onClick={() => setMobileView(tab.key)}
+              style={{
+                flex: 1,
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                gap: 2,
+                padding: '4px 0',
+                background: 'none',
+                border: 'none',
+                cursor: 'pointer',
+                color: mobileView === tab.key ? '#9333ea' : '#a1a1aa',
+                transition: 'color 0.15s',
+              }}
+            >
+              {tab.icon}
+              <span style={{ fontSize: 10, fontWeight: 510 }}>{tab.label}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* Fullscreen plot modal */}
-      {fullscreenPlot && (
+      {fullscreenPlot && createPortal(
         <div
-          className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4"
-          onClick={() => setFullscreenPlot(null)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 99999,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            backgroundColor: 'rgba(0,0,0,0.7)',
+            backdropFilter: 'blur(4px)',
+          }}
+          onClick={() => { setFullscreenPlot(null); setChartTheme({}); }}
         >
           <div
-            className="relative rounded-2xl overflow-hidden shadow-2xl"
-            style={{ backgroundColor: '#252131', width: '80vw', maxWidth: 900, height: '70vh' }}
+            style={{
+              position: 'relative',
+              width: isMobile ? 'calc(100vw - 24px)' : '80vw',
+              height: isMobile ? 'auto' : '75vh',
+              maxWidth: isMobile ? undefined : 900,
+              maxHeight: isMobile ? '85vh' : 700,
+              backgroundColor: '#1e1b2e',
+              borderRadius: isMobile ? 16 : 16,
+              border: '1px solid rgba(147,51,234,0.25)',
+              boxShadow: '0 25px 60px rgba(0,0,0,0.5)',
+              display: 'flex',
+              flexDirection: 'column' as const,
+              overflow: 'hidden',
+            }}
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex items-center justify-between p-4" style={{ borderBottom: '1px solid rgba(147,51,234,0.2)' }}>
-              <h3 className="text-[15px] font-semibold" style={{ color: '#e4e4e7' }}>{fullscreenPlot.title}</h3>
-              <button
-                onClick={() => setFullscreenPlot(null)}
-                className="w-8 h-8 flex items-center justify-center rounded-full transition-colors"
-                style={{ color: '#a1a1aa' }}
-              >
-                <X className="w-5 h-5" />
-              </button>
+            {/* Header */}
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              padding: '12px 20px',
+              borderBottom: '1px solid rgba(147,51,234,0.15)',
+              backgroundColor: '#161328',
+              flexShrink: 0,
+            }}>
+              <span style={{ fontSize: 15, fontWeight: 590, color: '#e4e4e7', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+                {fullscreenPlot.title}
+              </span>
+              <div style={{ display: 'flex', gap: 8, flexShrink: 0, marginLeft: 12 }}>
+                <button
+                  onClick={handleSavePlotPng}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    padding: '6px 14px',
+                    borderRadius: 8,
+                    backgroundColor: 'rgba(147,51,234,0.15)',
+                    color: '#e4e4e7',
+                    fontSize: 13,
+                    fontWeight: 510,
+                    border: '1px solid rgba(147,51,234,0.3)',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  Save PNG
+                </button>
+                <button
+                  onClick={() => { setFullscreenPlot(null); setChartTheme({}); }}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    padding: '6px 14px',
+                    borderRadius: 8,
+                    backgroundColor: '#9333ea',
+                    color: '#fff',
+                    fontSize: 13,
+                    fontWeight: 600,
+                    border: '1px solid rgba(255,255,255,0.2)',
+                    cursor: 'pointer',
+                    boxShadow: '0 2px 8px rgba(147,51,234,0.4)',
+                  }}
+                >
+                  <span style={{ fontSize: 18, lineHeight: 1 }}>&times;</span>
+                  Close
+                </button>
+              </div>
             </div>
-            <div className="p-4" style={{ height: 'calc(100% - 60px)' }}>
-              <Chart config={fullscreenPlot.chartConfig} data={fullscreenPlot.chartData} />
+            {/* Chart */}
+            <div ref={plotExportRef} style={{ flex: isMobile ? undefined : 1, minHeight: isMobile ? 300 : 0, height: isMobile ? '60vw' : undefined, maxHeight: isMobile ? '65vh' : undefined, padding: 16, backgroundColor: chartTheme.backgroundColor || 'transparent' }}>
+              <Chart config={fullscreenPlot.chartConfig} data={fullscreenPlot.chartData} theme={chartTheme} />
+            </div>
+            {/* Customization bar */}
+            <div style={{
+              flexShrink: 0,
+              padding: '10px 20px',
+              borderTop: '1px solid rgba(147,51,234,0.15)',
+              backgroundColor: '#161328',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 16,
+              flexWrap: 'wrap',
+            }}>
+              {/* Chart color */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ fontSize: 11, color: '#a1a1aa', fontWeight: 510 }}>Color</span>
+                <div style={{ display: 'flex', gap: 4 }}>
+                  {["#9333ea", "#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#ec4899", "#06b6d4"].map((c) => (
+                    <button
+                      key={c}
+                      onClick={() => setChartTheme((prev) => ({ ...prev, color: c }))}
+                      style={{
+                        width: 20,
+                        height: 20,
+                        borderRadius: 6,
+                        backgroundColor: c,
+                        border: (chartTheme.color || "#9333ea") === c ? '2px solid #fff' : '2px solid transparent',
+                        cursor: 'pointer',
+                        transition: 'border-color 0.15s',
+                      }}
+                    />
+                  ))}
+                  <label style={{ position: 'relative', width: 20, height: 20 }}>
+                    <input
+                      type="color"
+                      value={chartTheme.color || "#9333ea"}
+                      onChange={(e) => setChartTheme((prev) => ({ ...prev, color: e.target.value }))}
+                      style={{ position: 'absolute', inset: 0, opacity: 0, cursor: 'pointer', width: '100%', height: '100%' }}
+                    />
+                    <div style={{
+                      width: 20,
+                      height: 20,
+                      borderRadius: 6,
+                      background: 'conic-gradient(red, yellow, lime, aqua, blue, magenta, red)',
+                      border: '2px solid rgba(255,255,255,0.2)',
+                      pointerEvents: 'none',
+                    }} />
+                  </label>
+                </div>
+              </div>
+              {/* Background color */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ fontSize: 11, color: '#a1a1aa', fontWeight: 510 }}>Background</span>
+                <div style={{ display: 'flex', gap: 4 }}>
+                  {[
+                    { value: undefined, label: "Default", bg: 'transparent', border: '2px dashed rgba(147,51,234,0.3)' },
+                    { value: "#ffffff", label: "White", bg: '#ffffff', border: '2px solid rgba(0,0,0,0.1)' },
+                    { value: "#1e1b2e", label: "Dark", bg: '#1e1b2e', border: '2px solid rgba(147,51,234,0.3)' },
+                    { value: "#0f172a", label: "Navy", bg: '#0f172a', border: '2px solid rgba(51,65,85,0.5)' },
+                    { value: "#111111", label: "Black", bg: '#111111', border: '2px solid rgba(255,255,255,0.1)' },
+                  ].map((opt) => (
+                    <button
+                      key={opt.label}
+                      onClick={() => setChartTheme((prev) => ({ ...prev, backgroundColor: opt.value }))}
+                      title={opt.label}
+                      style={{
+                        width: 20,
+                        height: 20,
+                        borderRadius: 6,
+                        backgroundColor: opt.bg,
+                        border: chartTheme.backgroundColor === opt.value ? '2px solid #9333ea' : opt.border,
+                        cursor: 'pointer',
+                        transition: 'border-color 0.15s',
+                      }}
+                    />
+                  ))}
+                  <label style={{ position: 'relative', width: 20, height: 20 }}>
+                    <input
+                      type="color"
+                      value={chartTheme.backgroundColor || "#1e1b2e"}
+                      onChange={(e) => setChartTheme((prev) => ({ ...prev, backgroundColor: e.target.value }))}
+                      style={{ position: 'absolute', inset: 0, opacity: 0, cursor: 'pointer', width: '100%', height: '100%' }}
+                    />
+                    <div style={{
+                      width: 20,
+                      height: 20,
+                      borderRadius: 6,
+                      background: 'conic-gradient(#333, #666, #999, #ccc, #fff, #ccc, #999, #666, #333)',
+                      border: '2px solid rgba(255,255,255,0.2)',
+                      pointerEvents: 'none',
+                    }} />
+                  </label>
+                </div>
+              </div>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );

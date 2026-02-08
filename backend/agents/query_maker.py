@@ -49,6 +49,27 @@ IMPORTANT RULES:
 7. Never use exec(), eval(), or import dangerous modules
 8. Keep code simple and readable
 
+AVAILABLE LIBRARIES (already imported):
+- `pd` / `pandas` — pandas
+- `np` / `numpy` — numpy
+- `scipy` — scipy (for statistical tests)
+- `stats` — scipy.stats (for distributions, tests, regression)
+
+STATISTICAL CAPABILITIES:
+- Distributions: stats.norm, stats.t, stats.f, stats.chi2, stats.expon, stats.poisson, stats.binom, stats.uniform, stats.gamma, stats.beta, etc.
+- Tests: stats.ttest_ind, stats.ttest_1samp, stats.chi2_contingency, stats.f_oneway, stats.mannwhitneyu, stats.kruskal, stats.shapiro, stats.kstest, stats.pearsonr, stats.spearmanr
+- Regression: stats.linregress (simple), np.polyfit/np.polyval (polynomial)
+- For more complex regression, use numpy: np.linalg.lstsq
+
+REGRESSION EXAMPLES:
+- Simple linear regression:
+  slope, intercept, r_value, p_value, std_err = stats.linregress(df['x'], df['y'])
+  result = f"y = {slope:.4f}*x + {intercept:.4f}, R² = {r_value**2:.4f}, p = {p_value:.4e}"
+
+- Polynomial regression:
+  coeffs = np.polyfit(df['x'].values, df['y'].values, deg=2)
+  result = f"Coefficients: {coeffs}"
+
 RESPONSE FORMAT (JSON):
 {
     "code": "result = df['column'].mean()",
@@ -213,11 +234,11 @@ Respond with JSON."""
         safe_lines = []
 
         dangerous_patterns = [
-            r'import\s+os',
-            r'import\s+sys',
+            r'import\s+os\b',
+            r'import\s+sys\b',
             r'import\s+subprocess',
-            r'from\s+os',
-            r'from\s+sys',
+            r'from\s+os\b',
+            r'from\s+sys\b',
             r'exec\s*\(',
             r'eval\s*\(',
             r'open\s*\(',

@@ -16,6 +16,7 @@ import pandas as pd
 from backend.llm.anthropic_llm import AnthropicLLM, PLANNER_TOOLS
 from backend.agents.query_maker import QueryMaker
 from backend.services.query_executor import QueryExecutor
+from backend.services.metrics_evaluator import MetricsEvaluator, MetricsReport, get_metrics_evaluator
 from backend.models.planner_models import ChatEvent, ToolCall, PlotInfo
 
 if TYPE_CHECKING:
@@ -45,10 +46,12 @@ class PlannerAgent:
         llm: AnthropicLLM,
         query_maker: QueryMaker,
         query_executor: QueryExecutor,
+        metrics_evaluator: Optional[MetricsEvaluator] = None,
     ):
         self.llm = llm
         self.query_maker = query_maker
         self.query_executor = query_executor
+        self.metrics = metrics_evaluator or get_metrics_evaluator()
         self.system_prompt = self._load_system_prompt()
 
     def _load_system_prompt(self) -> str:
@@ -160,15 +163,25 @@ Guidelines:
         plots: list[PlotInfo] = []
         finished = False
         data_updated = False
+        last_query_result_preview: Optional[str] = None  # For hallucination checks
+        run_metrics: list[dict] = []  # Collect all metrics reports for this run
 
         # Build initial context
         data_context = self._build_data_context(current_df, filename)
+
+        # Get existing plots for dedup
+        existing_plots_info = ""
+        if session_mgr:
+            existing_plots = session_mgr.get_plots(session_id)
+            if existing_plots:
+                titles = [p.get("title", "Untitled") for p in existing_plots]
+                existing_plots_info = f"\n\nEXISTING PLOTS (already created — do NOT recreate these. If user asks for a similar plot, tell them it already exists instead of creating a duplicate):\n" + "\n".join(f"- {t}" for t in titles)
 
         # Initialize messages
         messages = [{
             "role": "user",
             "content": f"""DATA CONTEXT:
-{data_context}
+{data_context}{existing_plots_info}
 
 USER REQUEST:
 {user_message}
@@ -236,6 +249,20 @@ Use the available tools to fulfill this request. Always call finish() when done.
                 "content": assistant_content
             })
 
+            # Yield any text blocks that accompany tool calls
+            # (LLM sometimes puts user-facing text in a text block instead of write_to_chat)
+            if tool_calls:
+                for block in response.content:
+                    if block.type == "text" and block.text.strip():
+                        # Only yield if no write_to_chat call in this batch (avoid duplicates)
+                        has_write_to_chat = any(tc.name == "write_to_chat" for tc in tool_calls)
+                        if not has_write_to_chat:
+                            yield ChatEvent(event_type="text", data={"text": block.text})
+                            chat_messages.append(block.text)
+                            if session_mgr:
+                                session_mgr.add_chat_message(session_id, "assistant", block.text)
+                        break  # Only yield the first text block
+
             # Process tool calls
             if tool_calls:
                 tool_results = []
@@ -281,11 +308,30 @@ Use the available tools to fulfill this request. Always call finish() when done.
                         "is_error": result.get("is_error", False)
                     })
 
+                    # Collect metrics from tool result
+                    if result.get("metrics"):
+                        run_metrics.append(result["metrics"])
+
+                    # Track last query result for hallucination checks
+                    if tool_call.name == "generate_query" and result.get("result_preview"):
+                        last_query_result_preview = result["result_preview"]
+
                     # Yield events based on tool type
                     if tool_call.name == "write_to_chat":
+                        chat_text = tool_call.input.get("text", "")
+                        # Hallucination check: log only, don't feed back to LLM
+                        # (feeding FAIL back causes LLM to duplicate messages)
+                        if last_query_result_preview and chat_text:
+                            hall_report = self.metrics.evaluate_chat_text(
+                                chat_text, last_query_result_preview
+                            )
+                            run_metrics.append(hall_report.to_dict())
+                            if not hall_report.all_passed:
+                                safe_print(f"[Planner] Hallucination check (info only): {hall_report.to_feedback()}")
+
                         yield ChatEvent(
                             event_type="text",
-                            data={"text": tool_call.input.get("text", "")}
+                            data={"text": chat_text}
                         )
                     elif tool_call.name == "generate_query":
                         if result.get("is_error"):
@@ -350,7 +396,21 @@ Use the available tools to fulfill this request. Always call finish() when done.
                             session_mgr.add_chat_message(session_id, "assistant", block.text)
                 break
 
-        # Yield done event
+        # Safety net: if the agent finished without sending any text or plots to the user,
+        # send a fallback message so the user always gets a response
+        if not chat_messages and not plots:
+            safe_print(f"[Planner] WARNING: Agent finished without any user-visible output! Sending fallback.")
+            fallback_text = "I wasn't able to produce a response for that request. Could you try rephrasing your question?"
+            yield ChatEvent(event_type="text", data={"text": fallback_text})
+            if session_mgr:
+                session_mgr.add_chat_message(session_id, "assistant", fallback_text)
+
+        # Generate follow-up suggestions
+        followup_suggestions = self._generate_followup_suggestions(
+            current_df, chat_messages, plots, user_message
+        )
+
+        # Yield done event with metrics summary
         yield ChatEvent(
             event_type="done",
             data={
@@ -359,8 +419,103 @@ Use the available tools to fulfill this request. Always call finish() when done.
                 "plots_created": len(plots),
                 "data_updated": data_updated,
                 "new_df": current_df if data_updated else None,
+                "metrics": run_metrics,
+                "suggestions": followup_suggestions,
             }
         )
+
+    def _generate_followup_suggestions(
+        self,
+        df: pd.DataFrame,
+        chat_messages: list[str],
+        plots: list[PlotInfo],
+        user_message: str,
+    ) -> list[dict]:
+        """Generate follow-up suggestion chips based on conversation context."""
+        suggestions = []
+        numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+        categorical_cols = [
+            c for c in df.select_dtypes(exclude=['number']).columns
+            if df[c].nunique() <= 20
+        ]
+
+        # Check what was discussed to suggest relevant follow-ups
+        msg_lower = user_message.lower()
+        all_text = " ".join(chat_messages).lower()
+
+        # Check for data quality issues
+        has_missing = df.isnull().any().any()
+        has_duplicates = df.duplicated().any()
+
+        # After initial analysis, suggest data cleaning if needed
+        if (has_missing or has_duplicates) and "clean" not in msg_lower:
+            parts = []
+            if has_missing:
+                parts.append(f"{df.isnull().sum().sum()} missing values")
+            if has_duplicates:
+                parts.append(f"{df.duplicated().sum()} duplicates")
+            suggestions.append({
+                "text": f"Clean the data ({', '.join(parts)})",
+                "category": "cleaning",
+            })
+
+        # If plots were created, suggest deeper analysis
+        if plots:
+            if numeric_cols and len(numeric_cols) >= 2:
+                suggestions.append({
+                    "text": f"Show correlation between {numeric_cols[0]} and {numeric_cols[1]}",
+                    "category": "analysis",
+                })
+
+        # If statistics were discussed, suggest visualizations
+        if any(w in msg_lower for w in ["statistic", "mean", "average", "summary", "describe"]):
+            if numeric_cols:
+                suggestions.append({
+                    "text": f"Show box plot for {numeric_cols[0]}",
+                    "category": "visualization",
+                })
+
+        # If distribution was discussed, suggest tests
+        if any(w in msg_lower for w in ["distribution", "histogram", "розподіл"]):
+            if numeric_cols:
+                suggestions.append({
+                    "text": f"Run normality test on {numeric_cols[0]}",
+                    "category": "analysis",
+                })
+
+        # If regression was discussed, suggest prediction
+        if any(w in msg_lower for w in ["regression", "regres", "predict", "trend"]):
+            suggestions.append({
+                "text": "Show scatter plot with trend line",
+                "category": "visualization",
+            })
+
+        # General suggestions based on data
+        if len(suggestions) < 3 and numeric_cols and categorical_cols:
+            suggestions.append({
+                "text": f"Compare {numeric_cols[0]} across {categorical_cols[0]} groups",
+                "category": "analysis",
+            })
+
+        if len(suggestions) < 3 and len(numeric_cols) >= 2:
+            suggestions.append({
+                "text": f"Build regression of {numeric_cols[1]} on {numeric_cols[0]}",
+                "category": "analysis",
+            })
+
+        if len(suggestions) < 3:
+            suggestions.append({
+                "text": "Are there any outliers in the data?",
+                "category": "analysis",
+            })
+
+        if len(suggestions) < 3 and "missing" not in all_text:
+            suggestions.append({
+                "text": "Check for missing values",
+                "category": "analysis",
+            })
+
+        return suggestions[:3]
 
     async def _execute_tool(
         self,
@@ -433,6 +588,16 @@ Use the available tools to fulfill this request. Always call finish() when done.
         # Delegate to QueryMaker
         generated = await self.query_maker.generate_query(intent, data_summary)
 
+        # Evaluate code safety before execution
+        safety_report = self.metrics.evaluate_code_safety(generated.code)
+        if not safety_report.all_passed:
+            safe_print(f"[Planner] Code safety FAILED: {safety_report.to_feedback()}")
+            return {
+                "content": f"Code rejected by safety check.{safety_report.to_feedback()}",
+                "is_error": True,
+                "metrics": safety_report.to_dict(),
+            }
+
         # Execute code
         result = self.query_executor.execute(generated.code, df)
 
@@ -448,6 +613,16 @@ Use the available tools to fulfill this request. Always call finish() when done.
                 error=result.error[:500] if result.error else None,
             )
 
+        # Evaluate valid_answer metric
+        query_metrics = self.metrics.evaluate_query_result(
+            success=result.success,
+            result=result.result,
+            result_type=result.result_type,
+            result_preview=result.result_preview,
+            error=result.error,
+            intent=intent,
+        )
+
         if result.success:
             response = {
                 "content": (
@@ -455,7 +630,10 @@ Use the available tools to fulfill this request. Always call finish() when done.
                     f"Code: {generated.code}\n"
                     f"Explanation: {generated.explanation}\n"
                     f"Result: {result.result_preview}"
-                )
+                    f"{query_metrics.to_feedback()}"
+                ),
+                "metrics": query_metrics.to_dict(),
+                "result_preview": result.result_preview,
             }
 
             # If transformation, return new df with detailed change info
@@ -508,8 +686,9 @@ Use the available tools to fulfill this request. Always call finish() when done.
             return response
         else:
             return {
-                "content": f"Query failed: {result.error}",
-                "is_error": True
+                "content": f"Query failed: {result.error}{query_metrics.to_feedback()}",
+                "is_error": True,
+                "metrics": query_metrics.to_dict(),
             }
 
     async def _handle_create_plot(
@@ -562,11 +741,11 @@ Use the available tools to fulfill this request. Always call finish() when done.
                     "is_error": True
                 }
 
-            # Create chart config
+            # Create chart config (box plots use special keys)
             chart_config = ChartConfig(
                 chart_type=plot_type,
-                x_key=x_column,
-                y_key=y_column,
+                x_key="name" if plot_type == "box" else x_column,
+                y_key="value" if plot_type == "box" else y_column,
                 color_key=color_column,
             )
 
@@ -681,6 +860,42 @@ Use the available tools to fulfill this request. Always call finish() when done.
                         for idx, val in value_counts.items()
                     ]
 
+            elif plot_type == "box":
+                # Box plot: compute 5-number summary (min, Q1, median, Q3, max)
+                numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+                categorical_cols = df.select_dtypes(exclude=['number']).columns.tolist()
+
+                if x_column in df.columns and not pd.api.types.is_numeric_dtype(df[x_column]) and y_column in df.columns and pd.api.types.is_numeric_dtype(df[y_column]):
+                    # Grouped box plot: y_column grouped by x_column
+                    box_data = []
+                    for group in df[x_column].dropna().unique()[:20]:
+                        col_data = df[df[x_column] == group][y_column].dropna()
+                        if len(col_data) > 0:
+                            box_data.append({
+                                "name": str(group),
+                                "min": round(float(col_data.min()), 2),
+                                "q1": round(float(col_data.quantile(0.25)), 2),
+                                "median": round(float(col_data.quantile(0.5)), 2),
+                                "q3": round(float(col_data.quantile(0.75)), 2),
+                                "max": round(float(col_data.max()), 2),
+                            })
+                    return box_data
+                else:
+                    # Box plot for each numeric column
+                    box_data = []
+                    for col in numeric_cols[:15]:
+                        col_data = df[col].dropna()
+                        if len(col_data) > 0:
+                            box_data.append({
+                                "name": col,
+                                "min": round(float(col_data.min()), 2),
+                                "q1": round(float(col_data.quantile(0.25)), 2),
+                                "median": round(float(col_data.quantile(0.5)), 2),
+                                "q3": round(float(col_data.quantile(0.75)), 2),
+                                "max": round(float(col_data.max()), 2),
+                            })
+                    return box_data
+
             elif plot_type == "scatter":
                 # For scatter, return raw data points (limited)
                 sample = df[[x_column, y_column]].dropna().head(500)
@@ -691,7 +906,7 @@ Use the available tools to fulfill this request. Always call finish() when done.
                 if pd.api.types.is_numeric_dtype(df[y_column]):
                     agg_func = self._get_agg_func(aggregation)
 
-                    if color_column:
+                    if color_column and color_column != x_column:
                         # Grouped aggregation
                         grouped = df.groupby([x_column, color_column])[y_column].agg(agg_func).reset_index()
                         grouped = grouped.head(100)  # Limit data points

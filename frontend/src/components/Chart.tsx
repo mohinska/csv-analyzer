@@ -11,10 +11,16 @@ export interface ChartConfig {
   color_key?: string | null;
 }
 
+export interface ChartTheme {
+  color?: string;
+  backgroundColor?: string;
+}
+
 interface ChartProps {
   config: ChartConfig;
   data: Record<string, unknown>[];
   thumbnail?: boolean;
+  theme?: ChartTheme;
 }
 
 const CHART_COLORS = [
@@ -39,7 +45,65 @@ const axisProps = {
   tickLine: false as const,
 };
 
-export function Chart({ config, data, thumbnail = false }: ChartProps) {
+/* eslint-disable @typescript-eslint/no-explicit-any */
+function BoxPlotShape(props: any) {
+  const { x, y, width, height, payload } = props;
+  if (!payload || !width) return null;
+
+  const min = Number(payload.min);
+  const q1 = Number(payload.q1);
+  const median = Number(payload.median);
+  const q3 = Number(payload.q3);
+  const max = Number(payload.max);
+  const iqr = q3 - q1;
+  if (iqr === 0 && height === 0) return null;
+
+  const ppu = iqr !== 0 ? height / iqr : 1;
+  const cx = x + width / 2;
+
+  const yQ3 = y;
+  const yQ1 = y + height;
+  const yMedian = yQ1 - (median - q1) * ppu;
+  const yMin = yQ1 + (q1 - min) * ppu;
+  const yMax = yQ3 - (max - q3) * ppu;
+  const capW = Math.min(width * 0.5, 20);
+
+  return (
+    <g>
+      <rect x={x + 2} y={yQ3} width={width - 4} height={Math.max(height, 1)} fill="#9333ea" rx={3} opacity={0.75} />
+      <line x1={x + 2} y1={yMedian} x2={x + width - 2} y2={yMedian} stroke="#fff" strokeWidth={2} />
+      <line x1={cx} y1={yQ1} x2={cx} y2={yMin} stroke="#c084fc" strokeWidth={1.5} />
+      <line x1={cx - capW / 2} y1={yMin} x2={cx + capW / 2} y2={yMin} stroke="#c084fc" strokeWidth={1.5} />
+      <line x1={cx} y1={yQ3} x2={cx} y2={yMax} stroke="#c084fc" strokeWidth={1.5} />
+      <line x1={cx - capW / 2} y1={yMax} x2={cx + capW / 2} y2={yMax} stroke="#c084fc" strokeWidth={1.5} />
+    </g>
+  );
+}
+
+function BoxTooltip({ active, payload }: any) {
+  if (!active || !payload?.[1]?.payload) return null;
+  const d = payload[1].payload;
+  return (
+    <div style={{
+      backgroundColor: "#252131",
+      border: "1px solid rgba(147,51,234,0.3)",
+      borderRadius: 8,
+      padding: "8px 12px",
+      fontSize: 11,
+    }}>
+      <p style={{ color: "#e4e4e7", fontWeight: 600, marginBottom: 4 }}>{d.name}</p>
+      <p style={{ color: "#a1a1aa" }}>Max: {Number(d.max).toFixed(2)}</p>
+      <p style={{ color: "#a1a1aa" }}>Q3: {Number(d.q3).toFixed(2)}</p>
+      <p style={{ color: "#a1a1aa" }}>Median: {Number(d.median).toFixed(2)}</p>
+      <p style={{ color: "#a1a1aa" }}>Q1: {Number(d.q1).toFixed(2)}</p>
+      <p style={{ color: "#a1a1aa" }}>Min: {Number(d.min).toFixed(2)}</p>
+    </div>
+  );
+}
+/* eslint-enable @typescript-eslint/no-explicit-any */
+
+export function Chart({ config, data, thumbnail = false, theme }: ChartProps) {
+  const mainColor = theme?.color || "#9333ea";
   if (!data || data.length === 0) {
     return (
       <div className="w-full h-full flex items-center justify-center">
@@ -76,7 +140,7 @@ export function Chart({ config, data, thumbnail = false }: ChartProps) {
             />
             <YAxis {...axisProps} hide={thumbnail} width={thumbnail ? 0 : 45} />
             {!thumbnail && <Tooltip {...tooltipStyle} />}
-            <Bar dataKey={actualYKey} fill="#9333ea" radius={[3, 3, 0, 0]} />
+            <Bar dataKey={actualYKey} fill={mainColor} radius={[3, 3, 0, 0]} />
           </BarChart>
         </ResponsiveContainer>
       );
@@ -92,9 +156,9 @@ export function Chart({ config, data, thumbnail = false }: ChartProps) {
             <Line
               type="monotone"
               dataKey={actualYKey}
-              stroke="#9333ea"
+              stroke={mainColor}
               strokeWidth={2}
-              dot={thumbnail ? false : { fill: "#9333ea", r: 2 }}
+              dot={thumbnail ? false : { fill: mainColor, r: 2 }}
             />
           </LineChart>
         </ResponsiveContainer>
@@ -111,8 +175,8 @@ export function Chart({ config, data, thumbnail = false }: ChartProps) {
             <Area
               type="monotone"
               dataKey={actualYKey}
-              stroke="#9333ea"
-              fill="rgba(147,51,234,0.3)"
+              stroke={mainColor}
+              fill={`${mainColor}4D`}
             />
           </AreaChart>
         </ResponsiveContainer>
@@ -126,10 +190,53 @@ export function Chart({ config, data, thumbnail = false }: ChartProps) {
             <XAxis dataKey={x_key} {...axisProps} hide={thumbnail} name={x_key} />
             <YAxis dataKey={actualYKey} {...axisProps} hide={thumbnail} width={thumbnail ? 0 : 45} name={actualYKey} />
             {!thumbnail && <Tooltip {...tooltipStyle} />}
-            <Scatter data={data} fill="#9333ea" />
+            <Scatter data={data} fill={mainColor} />
           </ScatterChart>
         </ResponsiveContainer>
       );
+
+    case "box": {
+      const boxData = data.map((d) => ({
+        ...d,
+        _spacer: Number(d.q1),
+        _iqr: Number(d.q3) - Number(d.q1),
+      }));
+      const allVals = data.flatMap((d) => [Number(d.min), Number(d.max)]);
+      const domainMin = Math.min(...allVals);
+      const domainMax = Math.max(...allVals);
+      const pad = (domainMax - domainMin) * 0.1 || 1;
+      return (
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={boxData} margin={margin} barCategoryGap="25%">
+            {!thumbnail && <CartesianGrid strokeDasharray="3 3" stroke="rgba(147,51,234,0.1)" />}
+            <XAxis
+              dataKey="name"
+              {...axisProps}
+              hide={thumbnail}
+              angle={data.length > 6 ? -35 : 0}
+              textAnchor={data.length > 6 ? "end" : "middle"}
+              height={thumbnail ? 0 : data.length > 6 ? 55 : 30}
+              interval={0}
+            />
+            <YAxis
+              {...axisProps}
+              hide={thumbnail}
+              width={thumbnail ? 0 : 55}
+              domain={[domainMin - pad, domainMax + pad]}
+            />
+            {!thumbnail && <Tooltip content={<BoxTooltip />} />}
+            <Bar dataKey="_spacer" stackId="box" fill="transparent" isAnimationActive={false} />
+            <Bar
+              dataKey="_iqr"
+              stackId="box"
+              fill="transparent"
+              isAnimationActive={false}
+              shape={(props: Record<string, unknown>) => <BoxPlotShape {...props} />}
+            />
+          </BarChart>
+        </ResponsiveContainer>
+      );
+    }
 
     case "pie":
       return (
@@ -165,7 +272,7 @@ export function Chart({ config, data, thumbnail = false }: ChartProps) {
             <XAxis dataKey={x_key} {...axisProps} hide={thumbnail} />
             <YAxis {...axisProps} hide={thumbnail} width={thumbnail ? 0 : 45} />
             {!thumbnail && <Tooltip {...tooltipStyle} />}
-            <Bar dataKey={actualYKey} fill="#9333ea" radius={[3, 3, 0, 0]} />
+            <Bar dataKey={actualYKey} fill={mainColor} radius={[3, 3, 0, 0]} />
           </BarChart>
         </ResponsiveContainer>
       );

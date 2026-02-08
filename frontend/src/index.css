@@ -89,7 +89,12 @@
     line-height: inherit;
     padding: 0;
     overflow: hidden;
-    padding: 2rem;
+  }
+
+  @media (min-width: 769px) {
+    body {
+      padding: 2rem;
+    }
   }
 
   html, body, #root {

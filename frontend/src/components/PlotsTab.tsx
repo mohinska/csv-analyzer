@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Search, BarChart3 } from "lucide-react";
+import { Search, BarChart3, Trash2, Download } from "lucide-react";
 import { MarkdownLatex } from "./MarkdownLatex";
 import { Chart, ChartConfig } from "./Chart";
 
@@ -16,6 +16,9 @@ export interface PlotData {
 
 interface PlotsTabProps {
   plots: PlotData[];
+  onViewPlot?: (plot: PlotData) => void;
+  onDeletePlot?: (plotId: number) => void;
+  onSavePlot?: (plot: PlotData) => void;
 }
 
 function PlotChart({ plot }: { plot: PlotData }) {
@@ -102,17 +105,15 @@ function ExpandedPlot({
 
 function PlotCard({
   plot,
-  isExpanded,
-  onToggle,
+  onView,
+  onDelete,
+  onSave,
 }: {
   plot: PlotData;
-  isExpanded: boolean;
-  onToggle: () => void;
+  onView: () => void;
+  onDelete?: () => void;
+  onSave?: () => void;
 }) {
-  if (isExpanded) {
-    return <ExpandedPlot plot={plot} onCollapse={onToggle} />;
-  }
-
   return (
     <div
       className="rounded-[20px] shrink-0 w-full overflow-hidden"
@@ -140,7 +141,7 @@ function PlotCard({
           </p>
           <div className="flex gap-[5px]">
             <button
-              onClick={onToggle}
+              onClick={onView}
               className="h-[24px] px-4 rounded-md text-[13px] hover:opacity-90 transition-all"
               style={{
                 fontWeight: 510,
@@ -152,6 +153,37 @@ function PlotCard({
             >
               View
             </button>
+            {onSave && (
+              <button
+                onClick={onSave}
+                className="h-[24px] w-[24px] rounded-md flex items-center justify-center hover:opacity-90 transition-all"
+                style={{
+                  color: '#a1a1aa',
+                  backgroundColor: 'rgba(147,51,234,0.08)',
+                  border: '1px solid rgba(147,51,234,0.2)',
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.2)'; e.currentTarget.style.color = '#e4e4e7'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.08)'; e.currentTarget.style.color = '#a1a1aa'; }}
+                title="Save as PNG"
+              >
+                <Download className="w-3 h-3" />
+              </button>
+            )}
+            {onDelete && (
+              <button
+                onClick={onDelete}
+                className="h-[24px] w-[24px] rounded-md flex items-center justify-center hover:opacity-90 transition-all"
+                style={{
+                  color: '#a1a1aa',
+                  backgroundColor: 'rgba(239,68,68,0.08)',
+                  border: '1px solid rgba(239,68,68,0.2)',
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'rgba(239,68,68,0.2)'; e.currentTarget.style.color = '#ef4444'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'rgba(239,68,68,0.08)'; e.currentTarget.style.color = '#a1a1aa'; }}
+              >
+                <Trash2 className="w-3 h-3" />
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -159,9 +191,8 @@ function PlotCard({
   );
 }
 
-export function PlotsTab({ plots }: PlotsTabProps) {
+export function PlotsTab({ plots, onViewPlot, onDeletePlot, onSavePlot }: PlotsTabProps) {
   const [searchQuery, setSearchQuery] = useState("");
-  const [expandedPlot, setExpandedPlot] = useState<number | null>(null);
 
   const filteredPlots = plots.filter((plot) => {
     if (!searchQuery) return true;
@@ -222,10 +253,9 @@ export function PlotsTab({ plots }: PlotsTabProps) {
             <PlotCard
               key={plot.id}
               plot={plot}
-              isExpanded={expandedPlot === plot.id}
-              onToggle={() =>
-                setExpandedPlot(expandedPlot === plot.id ? null : plot.id)
-              }
+              onView={() => onViewPlot?.(plot)}
+              onSave={onSavePlot ? () => onSavePlot(plot) : undefined}
+              onDelete={onDeletePlot ? () => onDeletePlot(plot.id) : undefined}
             />
           ))}
         </div>

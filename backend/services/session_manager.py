@@ -130,10 +130,15 @@ class SessionManager:
         """Get the directory for a session."""
         return self.data_dir / session_id
 
+    @staticmethod
+    def _is_parquet(filename: str) -> bool:
+        """Check if a filename indicates a Parquet file."""
+        return filename.lower().endswith((".parquet", ".pq"))
+
     def save_file(self, session_id: str, filename: str, content: bytes) -> dict:
         """
-        Save uploaded CSV file and return metadata.
-        Saves as both original.csv (never modified) and current.csv (for transformations).
+        Save uploaded file (CSV or Parquet) and return metadata.
+        Saves as both original and current copies (CSV internally for transformations).
         Returns dict with row_count, column_count, columns, preview.
         """
         # Ensure session exists
@@ -147,16 +152,22 @@ class SessionManager:
         session_dir = self.get_session_dir(session_id)
         session_dir.mkdir(parents=True, exist_ok=True)
 
-        # Save original file (immutable backup)
-        original_path = session_dir / "original.csv"
-        original_path.write_bytes(content)
+        # Parse file based on type
+        if self._is_parquet(filename):
+            import io
+            df = pd.read_parquet(io.BytesIO(content))
+            # Save original as parquet
+            original_path = session_dir / "original.parquet"
+            original_path.write_bytes(content)
+        else:
+            # Save original CSV bytes
+            original_path = session_dir / "original.csv"
+            original_path.write_bytes(content)
+            df = pd.read_csv(original_path)
 
-        # Save current file (working copy for transformations)
+        # Always save current as CSV (working copy for transformations)
         current_path = session_dir / "current.csv"
-        current_path.write_bytes(content)
-
-        # Parse CSV and get metadata
-        df = pd.read_csv(current_path)
+        df.to_csv(current_path, index=False)
 
         metadata = {
             "row_count": len(df),

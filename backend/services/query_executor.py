@@ -13,6 +13,8 @@ import matplotlib
 matplotlib.use('Agg')  # Non-interactive backend
 import matplotlib.pyplot as plt
 import seaborn as sns
+import scipy
+import scipy.stats
 
 
 @dataclass
@@ -41,6 +43,8 @@ class QueryExecutor:
         'matplotlib': matplotlib,
         'sns': sns,
         'seaborn': sns,
+        'scipy': scipy,
+        'stats': scipy.stats,
     }
 
     def execute(self, code: str, df: pd.DataFrame) -> ExecutionResult:
@@ -173,6 +177,8 @@ class QueryExecutor:
                 'seaborn': sns,
                 'pandas': pd,
                 'numpy': np,
+                'scipy': scipy,
+                'scipy.stats': scipy.stats,
             }
             if name in allowed:
                 return allowed[name]
@@ -180,6 +186,9 @@ class QueryExecutor:
             if name == 'matplotlib' and fromlist:
                 if 'pyplot' in fromlist:
                     return matplotlib
+            if name == 'scipy' and fromlist:
+                if 'stats' in fromlist:
+                    return scipy
             raise ImportError(f"Import of '{name}' is not allowed")
 
         # Start with safe subset of real builtins

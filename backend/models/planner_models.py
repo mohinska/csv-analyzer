@@ -63,6 +63,7 @@ class ChatRequest(BaseModel):
     session_id: str
     message: str
     stream: bool = True
+    internal: bool = False  # If true, don't save full message to visible history
 
 
 class ChatResponse(BaseModel):

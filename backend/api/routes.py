@@ -8,7 +8,7 @@ from backend.models.schemas import (
 )
 from backend.models.planner_models import ChatRequest, ChatResponse
 from backend.agents.query_maker import QueryMaker
-from backend.agents.planner import PlannerAgent
+from backend.agents.planner import PlannerAgent, safe_print
 from backend.llm.anthropic_llm import AnthropicLLM
 from backend.llm.mock_llm import MockLLM
 from backend.config import get_settings, Settings
@@ -110,10 +110,11 @@ async def upload_file(
     file: UploadFile = File(...),
     session_mgr: SessionManager = Depends(get_session_manager),
 ):
-    """Upload a CSV file to start analysis."""
+    """Upload a CSV or Parquet file to start analysis."""
     # Validate file type
-    if not file.filename.endswith(".csv"):
-        raise HTTPException(status_code=400, detail="Only CSV files are supported")
+    allowed_extensions = (".csv", ".parquet", ".pq")
+    if not any(file.filename.lower().endswith(ext) for ext in allowed_extensions):
+        raise HTTPException(status_code=400, detail="Only CSV and Parquet files are supported")
 
     # Read file content
     content = await file.read()
@@ -132,7 +133,7 @@ async def upload_file(
             message=f"Successfully loaded {file.filename} with {metadata['row_count']} rows and {metadata['column_count']} columns",
         )
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to parse CSV: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Failed to parse file: {str(e)}")
 
 
 # ============ Data Summary Endpoint ============
@@ -172,6 +173,38 @@ def _generate_suggestions(df: pd.DataFrame) -> list[dict]:
         if df[c].nunique() <= 20
     ]
 
+    # Check if data needs cleaning
+    has_missing = df.isnull().any().any()
+    has_duplicates = df.duplicated().any()
+
+    # Check data type issues
+    type_issues = []
+    for c in df.columns:
+        if df[c].dtype == 'object':
+            # Check if looks numeric
+            non_null = df[c].dropna()
+            if len(non_null) > 0:
+                try:
+                    pd.to_numeric(non_null.head(20))
+                    type_issues.append(c)
+                except (ValueError, TypeError):
+                    pass
+
+    if has_missing or has_duplicates or type_issues:
+        parts = []
+        if has_missing:
+            missing_count = df.isnull().sum().sum()
+            parts.append(f"{missing_count} missing values")
+        if has_duplicates:
+            dup_count = df.duplicated().sum()
+            parts.append(f"{dup_count} duplicate rows")
+        if type_issues:
+            parts.append(f"{len(type_issues)} columns with type issues")
+        suggestions.append({
+            "text": f"Clean the data (fix {', '.join(parts)})",
+            "category": "cleaning",
+        })
+
     if numeric_cols:
         suggestions.append({
             "text": f"What are the key statistics for {numeric_cols[0]}?",
@@ -190,10 +223,11 @@ def _generate_suggestions(df: pd.DataFrame) -> list[dict]:
             "category": "visualization",
         })
 
-    suggestions.append({
-        "text": "Are there any missing values in the data?",
-        "category": "analysis",
-    })
+    if not has_missing and not has_duplicates:
+        suggestions.append({
+            "text": "Are there any missing values in the data?",
+            "category": "analysis",
+        })
 
     return suggestions[:4]
 
@@ -414,14 +448,15 @@ async def chat(
     # Get session data
     df = session_mgr.get_dataframe(request.session_id)
     if df is None:
-        raise HTTPException(status_code=404, detail="No data found. Please upload a CSV file first.")
+        raise HTTPException(status_code=404, detail="No data found. Please upload a file first.")
 
     session = session_mgr.get_session(request.session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Save user message to history
-    session_mgr.add_chat_message(request.session_id, "user", request.message)
+    # Save user message to history (skip internal auto-analysis prompts)
+    if not request.internal:
+        session_mgr.add_chat_message(request.session_id, "user", request.message)
 
     # Initialize components
     query_maker = QueryMaker(llm)
@@ -434,12 +469,12 @@ async def chat(
         query_executor=executor,
     )
 
-    print(f"[Routes] /chat called: session={request.session_id}, message='{request.message[:50]}...'", flush=True)
+    safe_print(f"[Routes] /chat called: session={request.session_id}, message='{request.message[:50]}...'")
 
     if request.stream:
         # SSE streaming response
         async def event_generator():
-            print(f"[Routes] SSE generator started", flush=True)
+            safe_print(f"[Routes] SSE generator started")
             new_df = None
             data_updated = False
 
@@ -451,7 +486,7 @@ async def chat(
                     session_id=request.session_id,
                     session_mgr=session_mgr,
                 ):
-                    print(f"[Routes] Got event: {event.event_type}", flush=True)
+                    safe_print(f"[Routes] Got event: {event.event_type}")
                     # Check for data updates in done event
                     if event.event_type == "done":
                         data_updated = event.data.get("data_updated", False)
@@ -463,7 +498,7 @@ async def chat(
                         yield f"event: {event.event_type}\ndata: {json.dumps(event.data)}\n\n"
             except Exception as e:
                 import traceback
-                print(f"[Routes] SSE generator error: {e}", flush=True)
+                safe_print(f"[Routes] SSE generator error: {e}")
                 traceback.print_exc()
                 yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
 
