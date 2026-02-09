@@ -12,26 +12,22 @@ interface FileInfo {
 
 interface DataTabProps {
   fileInfo: FileInfo | null;
-  dataVersion: "current" | "original";
-  onVersionChange: (version: "current" | "original") => void;
   sessionId: string | null;
   onViewFullData?: () => void;
 }
 
 const RENDER_CHUNK = 200;
 
-export function DataTab({ fileInfo, dataVersion, onVersionChange, sessionId, onViewFullData }: DataTabProps) {
+export function DataTab({ fileInfo, sessionId, onViewFullData }: DataTabProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [sortColumn, setSortColumn] = useState<string | null>(null);
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
-  const [versionDropdownOpen, setVersionDropdownOpen] = useState(false);
   const [allRows, setAllRows] = useState<Record<string, unknown>[] | null>(null);
   const [isLoadingAll, setIsLoadingAll] = useState(false);
   const [visibleCount, setVisibleCount] = useState(RENDER_CHUNK);
   const [columnFilters, setColumnFilters] = useState<Record<string, Set<string>>>({});
   const [filterDropdownCol, setFilterDropdownCol] = useState<string | null>(null);
   const [filterSearch, setFilterSearch] = useState("");
-  const versionBtnRef = useRef<HTMLButtonElement>(null);
   const filterBtnRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -45,14 +41,14 @@ export function DataTab({ fileInfo, dataVersion, onVersionChange, sessionId, onV
     }
     setIsLoadingAll(true);
     setAllRows(null);
-    fetch(`/api/preview/${sessionId}?rows=99999&version=${dataVersion}`)
+    fetch(`/api/preview/${sessionId}?rows=99999`)
       .then(res => res.json())
       .then(data => {
         setAllRows(data.preview);
         setIsLoadingAll(false);
       })
       .catch(() => setIsLoadingAll(false));
-  }, [sessionId, dataVersion, fileInfo?.row_count]);
+  }, [sessionId, fileInfo?.row_count]);
 
   // Reset visible count when data/search/sort changes
   useEffect(() => {
@@ -130,7 +126,7 @@ export function DataTab({ fileInfo, dataVersion, onVersionChange, sessionId, onV
     }
     const blob = new Blob([csvRows.join("\n")], { type: "text/csv;charset=utf-8;" });
     const link = document.createElement("a");
-    link.download = fileInfo.filename.replace(".csv", `_${dataVersion}.csv`);
+    link.download = fileInfo.filename.replace(".csv", "_export.csv");
     link.href = URL.createObjectURL(blob);
     link.click();
     URL.revokeObjectURL(link.href);
@@ -187,74 +183,11 @@ export function DataTab({ fileInfo, dataVersion, onVersionChange, sessionId, onV
 
   return (
     <div className="flex flex-col h-full" style={{ backgroundColor: '#1e1b2e' }}>
-      {/* Version Dropdown + Search Row + Export */}
+      {/* Search Row */}
       <div className="flex items-center gap-2 px-5 py-3 shrink-0">
-        <div className="shrink-0">
-          <button
-            ref={versionBtnRef}
-            onClick={() => setVersionDropdownOpen(!versionDropdownOpen)}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg transition-colors"
-            style={{
-              background: 'linear-gradient(135deg, rgba(147,51,234,0.4) 0%, rgba(107,33,168,0.5) 100%)',
-              border: '1px solid rgba(147,51,234,0.35)',
-              boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.08), 0 1px 3px rgba(0,0,0,0.2)',
-            }}
-          >
-            <span className="text-[11px]" style={{ fontWeight: 510, color: '#e4e4e7' }}>
-              {dataVersion === "current" ? "Current" : "Initial"}
-            </span>
-            <span className="text-[10px]" style={{ color: '#a1a1aa' }}>
-              {fileInfo.row_count}×{fileInfo.column_count}
-            </span>
-            <ChevronDown className="w-3 h-3" style={{ color: '#a1a1aa' }} />
-          </button>
-          {versionDropdownOpen && createPortal(
-            <>
-              <div
-                style={{ position: 'fixed', inset: 0, zIndex: 9998 }}
-                onClick={() => setVersionDropdownOpen(false)}
-              />
-              <div
-                className="rounded-lg py-1 min-w-[130px]"
-                style={{
-                  position: 'fixed',
-                  zIndex: 9999,
-                  top: (versionBtnRef.current?.getBoundingClientRect().bottom ?? 0) + 4,
-                  left: versionBtnRef.current?.getBoundingClientRect().left ?? 0,
-                  backgroundColor: '#252131',
-                  border: '1px solid rgba(113,113,122,0.3)',
-                  boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
-                }}
-              >
-                <button
-                  onClick={() => {
-                    onVersionChange("original");
-                    setVersionDropdownOpen(false);
-                  }}
-                  className="w-full px-3 py-1.5 text-left text-[12px] flex items-center justify-between gap-4"
-                  style={{ color: dataVersion === "original" ? '#9333ea' : '#e4e4e7' }}
-                  onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.1)'}
-                  onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
-                >
-                  <span style={{ fontWeight: 510 }}>Initial</span>
-                </button>
-                <button
-                  onClick={() => {
-                    onVersionChange("current");
-                    setVersionDropdownOpen(false);
-                  }}
-                  className="w-full px-3 py-1.5 text-left text-[12px] flex items-center justify-between gap-4"
-                  style={{ color: dataVersion === "current" ? '#9333ea' : '#e4e4e7' }}
-                  onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.1)'}
-                  onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
-                >
-                  <span style={{ fontWeight: 510 }}>Original</span>
-                </button>
-              </div>
-            </>,
-            document.body
-          )}
-        </div>
+        <span className="text-[10px] shrink-0" style={{ color: '#a1a1aa' }}>
+          {fileInfo.row_count}×{fileInfo.column_count}
+        </span>
         <div
           className="flex-1 flex items-center gap-1 rounded-full px-2 h-[24px]"
           style={{ backgroundColor: 'rgba(15,13,25,0.6)', border: '1px solid rgba(147,51,234,0.15)' }}

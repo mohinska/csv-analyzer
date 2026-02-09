@@ -180,6 +180,10 @@
   }
 }
 
+button {
+  cursor: pointer;
+}
+
 html {
   font-size: var(--font-size);
 }

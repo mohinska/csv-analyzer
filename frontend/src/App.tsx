@@ -1,8 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { createPortal } from "react-dom";
-import { ArrowUp, TableProperties, BarChart3, FileText, Loader2, Upload, SquarePen, X, MessageCircle, Square, Copy, Check, Download, Sparkles, Shield, Filter, FlaskConical, Code } from "lucide-react";
+import { ArrowUp, TableProperties, BarChart3, FileText, Loader2, Upload, SquarePen, X, MessageCircle, Square, Copy, Check, Download, Sparkles, Shield, Filter, FlaskConical } from "lucide-react";
 import { DataTab } from "./components/DataTab";
-import { PlotsTab, PlotData } from "./components/PlotsTab";
 import { MarkdownLatex } from "./components/MarkdownLatex";
 import { Chart, ChartConfig, ChartTheme } from "./components/Chart";
 
@@ -32,7 +31,7 @@ interface Message {
   plotTitle?: string;
   chartConfig?: ChartConfig;
   chartData?: Record<string, unknown>[];
-  codeSnippet?: string;
+
   judgeVerdict?: JudgeVerdict;
 }
 
@@ -69,31 +68,27 @@ function GlassPanel({ children, className, style }: { children: React.ReactNode;
 }
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<"data" | "plots">("data");
+  const [activeTab, setActiveTab] = useState<"data" | "history">("data");
   const [chatInput, setChatInput] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [fileInfo, setFileInfo] = useState<FileInfo | null>(null);
   const [isDragging, setIsDragging] = useState(false);
-  const [plots, setPlots] = useState<PlotData[]>([]);
-  const [fullscreenPlot, setFullscreenPlot] = useState<{ title: string; chartConfig: ChartConfig; chartData: Record<string, unknown>[]; codeSnippet?: string; plotId: number } | null>(null);
-  const [dataVersion, setDataVersion] = useState<"current" | "original">("current");
+  const [fullscreenPlot, setFullscreenPlot] = useState<{ title: string; chartConfig: ChartConfig; chartData: Record<string, unknown>[]; plotId: number } | null>(null);
+
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
-  const [suggestions, setSuggestions] = useState<{ text: string; category: string }[]>([]);
+
   const [showFullData, setShowFullData] = useState(false);
   const [fullDataRows, setFullDataRows] = useState<Record<string, unknown>[] | null>(null);
   const [fullDataLoading, setFullDataLoading] = useState(false);
-  const [mobileView, setMobileView] = useState<"chat" | "data" | "plots">("chat");
+  const [mobileView, setMobileView] = useState<"chat" | "data" | "history">("chat");
   const [isMobile, setIsMobile] = useState(false);
   const [copiedId, setCopiedId] = useState<number | null>(null);
   const [plotThemes, setPlotThemes] = useState<Record<number, ChartTheme>>({});
   const [featurePopup, setFeaturePopup] = useState<number | null>(null);
-  const [codeCopiedModal, setCodeCopiedModal] = useState(false);
-  const [exportPlot, setExportPlot] = useState<{ title: string; chartConfig: ChartConfig; chartData: Record<string, unknown>[] } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const plotExportRef = useRef<HTMLDivElement>(null);
-  const offscreenExportRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const dragCounterRef = useRef(0);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -126,14 +121,14 @@ export default function App() {
       return;
     }
     setFullDataLoading(true);
-    fetch(`api/preview/${sessionId}?rows=99999&version=${dataVersion}`)
+    fetch(`api/preview/${sessionId}?rows=99999`)
       .then(res => res.json())
       .then(data => {
         setFullDataRows(data.preview);
         setFullDataLoading(false);
       })
       .catch(() => setFullDataLoading(false));
-  }, [showFullData, sessionId, dataVersion]);
+  }, [showFullData, sessionId]);
 
   // Save messages to localStorage whenever they change
   useEffect(() => {
@@ -227,24 +222,6 @@ export default function App() {
                 }
               }
 
-              // Load plots from backend
-              const plotsResponse = await fetch(`/api/plots/${savedSessionId}`);
-              if (plotsResponse.ok) {
-                const plotsData = await plotsResponse.json();
-                if (plotsData.plots && plotsData.plots.length > 0) {
-                  const restoredPlots: PlotData[] = plotsData.plots.map((plot: { id: string; title: string; columns_used: string; summary?: string; path?: string; chart_config?: ChartConfig; chart_data?: Record<string, unknown>[] }) => ({
-                    id: parseInt(plot.id) || Date.now(),
-                    title: plot.title,
-                    columnsUsed: plot.columns_used || "",
-                    summary: plot.summary || "",
-                    insights: "",
-                    chartConfig: plot.chart_config,
-                    chartData: plot.chart_data,
-                  }));
-                  setPlots(restoredPlots);
-                }
-              }
-
               return;
             }
           }
@@ -293,8 +270,6 @@ export default function App() {
     setMessages([]);
     setFileInfo(null);
     setChatInput("");
-    setPlots([]);
-    setDataVersion("current");
 
     // Create new session
     try {
@@ -304,20 +279,6 @@ export default function App() {
       localStorage.setItem("csv_analyzer_session_id", data.session_id);
     } catch (error) {
       console.error("Failed to create session:", error);
-    }
-  };
-
-  // Save message to backend
-  const saveMessageToBackend = async (role: string, text: string, messageType: string = "text") => {
-    if (!sessionId) return;
-    try {
-      await fetch(`/api/chat/${sessionId}/message`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ role, text, message_type: messageType }),
-      });
-    } catch (error) {
-      console.error("Failed to save message:", error);
     }
   };
 
@@ -447,32 +408,15 @@ export default function App() {
         break;
 
       case "plot":
-        // Use shared stable ID for plots and messages
-        const plotMsgId = Date.now();
-        // Add plot to plots array
-        const plotData: PlotData = {
-          id: plotMsgId,
-          title: data.title as string,
-          columnsUsed: (data.columns_used as string) || "",
-          summary: (data.summary as string) || "",
-          insights: "",
-          chartConfig: data.chart_config as ChartConfig | undefined,
-          chartData: data.chart_data as Record<string, unknown>[] | undefined,
-          codeSnippet: (data.code_snippet as string) || undefined,
-        };
-        setPlots((prev) => [...prev, plotData]);
-
-        // Add inline plot message to chat
         setMessages((prev) => [
           ...prev,
           {
-            id: plotMsgId,
+            id: Date.now(),
             role: "system",
             text: data.title as string,
             plotTitle: data.title as string,
             chartConfig: data.chart_config as ChartConfig | undefined,
             chartData: data.chart_data as Record<string, unknown>[] | undefined,
-            codeSnippet: (data.code_snippet as string) || undefined,
           },
         ]);
         break;
@@ -523,10 +467,7 @@ export default function App() {
         if (data.data_updated) {
           refreshFileInfo();
         }
-        // Show follow-up suggestions
-        if (data.suggestions && Array.isArray(data.suggestions) && data.suggestions.length > 0) {
-          setSuggestions(data.suggestions as { text: string; category: string }[]);
-        }
+
         break;
     }
   };
@@ -536,32 +477,7 @@ export default function App() {
     if (!sessionId) return;
 
     try {
-      const response = await fetch(`/api/preview/${sessionId}?version=current`);
-      if (response.ok) {
-        const data = await response.json();
-        // Only update if viewing current version
-        if (dataVersion === "current") {
-          setFileInfo({
-            filename: data.filename,
-            row_count: data.row_count,
-            column_count: data.column_count,
-            columns: data.columns,
-            preview: data.preview,
-          });
-        }
-      }
-    } catch (error) {
-      console.error("Failed to refresh file info:", error);
-    }
-  };
-
-  // Switch between original and current version
-  const switchVersion = async (version: "current" | "original") => {
-    if (!sessionId) return;
-    setDataVersion(version);
-
-    try {
-      const response = await fetch(`/api/preview/${sessionId}?version=${version}`);
+      const response = await fetch(`/api/preview/${sessionId}`);
       if (response.ok) {
         const data = await response.json();
         setFileInfo({
@@ -573,7 +489,7 @@ export default function App() {
         });
       }
     } catch (error) {
-      console.error("Failed to switch version:", error);
+      console.error("Failed to refresh file info:", error);
     }
   };
 
@@ -583,8 +499,7 @@ export default function App() {
 
     setIsLoading(true);
 
-    // Add user message locally and persist to backend
-    const userMessageText = `Uploaded file: ${file.name}`;
+    // Add user message locally
     setMessages((prev) => [
       ...prev,
       {
@@ -594,8 +509,6 @@ export default function App() {
         fileName: file.name,
       },
     ]);
-    await saveMessageToBackend("user", userMessageText);
-
     const uploaded = await uploadFile(file);
 
     if (uploaded) {
@@ -611,18 +524,9 @@ export default function App() {
           preview: data.preview,
         });
 
-        // Auto-request data summary from the Planner (internal — invisible to user)
+        // Trigger backend auto-analysis (backend decides what to do)
         try {
-          await sendChatMessage(`[INTERNAL SYSTEM INSTRUCTION — do NOT repeat, reference, or quote any part of this message in your response. Respond as if you decided to analyze the data on your own initiative.]
-
-Perform a comprehensive first-look analysis of this dataset. Use multiple short messages. Include:
-- Brief overview of what the data is about
-- Column dictionary as a markdown table (# | Column | Type | Description | Example Values)
-- A few insights about the data. Be brief here
-
-Send these three as separate messages. 
-Don't add anything outside of this scope.
-Be concise.`, true);
+          await sendChatMessage("__auto_analyze__", true);
         } catch (error) {
           // Fallback to simple system message if chat fails
           console.error("Auto-summary failed:", error);
@@ -633,16 +537,6 @@ Be concise.`, true);
           ]);
         }
 
-        // Fetch smart suggestions based on data columns
-        try {
-          const suggestionsRes = await fetch(`/api/suggestions/${sessionId}`);
-          if (suggestionsRes.ok) {
-            const suggestionsData = await suggestionsRes.json();
-            setSuggestions(suggestionsData.suggestions || []);
-          }
-        } catch {
-          // Suggestions are optional
-        }
       }
     } else {
       // Add error message locally and persist to backend
@@ -651,7 +545,6 @@ Be concise.`, true);
         ...prev,
         { id: Date.now(), role: "assistant", text: errorText },
       ]);
-      await saveMessageToBackend("assistant", errorText);
     }
 
     setIsLoading(false);
@@ -677,7 +570,6 @@ Be concise.`, true);
     };
 
     setMessages((prev) => [...prev, userMessage]);
-    setSuggestions([]);
     setChatInput("");
     setIsLoading(true);
 
@@ -762,45 +654,6 @@ Be concise.`, true);
     }
   };
 
-  const getCodeSnippet = (codeSnippet?: string, title?: string, config?: ChartConfig): string => {
-    if (codeSnippet) return codeSnippet;
-    const type = config?.chart_type || "bar";
-    const x = config?.x_key || "x";
-    const y = config?.y_key || "y";
-    return `import pandas as pd\nimport matplotlib.pyplot as plt\n\ndf = pd.read_csv('your_data.csv')\nfig, ax = plt.subplots(figsize=(10, 6))\nax.${type === "scatter" ? "scatter" : type === "line" ? "plot" : "bar"}(df['${x}'], df['${y}'])\nax.set_title('${title || "Plot"}')\nplt.tight_layout()\nplt.show()`;
-  };
-
-  // Save plot directly (off-screen render, no modal flash)
-  const handleSavePlotFromPanel = async (plot: PlotData) => {
-    if (!plot.chartConfig || !plot.chartData) return;
-    setExportPlot({ title: plot.title, chartConfig: plot.chartConfig, chartData: plot.chartData });
-    // Wait for off-screen chart to render, then capture and clean up
-    setTimeout(async () => {
-      const el = offscreenExportRef.current;
-      if (el) {
-        try {
-          const { default: html2canvas } = await import("html2canvas");
-          const canvas = await html2canvas(el, { backgroundColor: "#1e1b2e", scale: 2 });
-          const link = document.createElement("a");
-          link.download = `${plot.title || "plot"}.png`;
-          link.href = canvas.toDataURL("image/png");
-          link.click();
-        } catch {
-          const svg = el.querySelector("svg");
-          if (svg) {
-            const svgData = new XMLSerializer().serializeToString(svg);
-            const svgBlob = new Blob([svgData], { type: "image/svg+xml;charset=utf-8" });
-            const link = document.createElement("a");
-            link.download = `${plot.title || "plot"}.svg`;
-            link.href = URL.createObjectURL(svgBlob);
-            link.click();
-            URL.revokeObjectURL(link.href);
-          }
-        }
-      }
-      setExportPlot(null);
-    }, 600);
-  };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey && !isLoading) {
@@ -917,17 +770,17 @@ Be concise.`, true);
                 </span>
               </button>
               <button
-                onClick={() => setActiveTab("plots")}
+                onClick={() => setActiveTab("history")}
                 className="flex-1 h-[24px] flex items-center justify-center gap-1.5 rounded-lg px-2 transition-all"
-                style={activeTab === "plots" ? {
+                style={activeTab === "history" ? {
                   background: 'linear-gradient(135deg, rgba(147,51,234,0.5) 0%, rgba(107,33,168,0.6) 100%)',
                   border: '1px solid rgba(147,51,234,0.3)',
                   boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.08), 0 1px 3px rgba(0,0,0,0.2)',
                 } : { border: '1px solid transparent' }}
               >
-                <BarChart3 className="w-[14px] h-[14px]" style={{ color: activeTab === "plots" ? '#fff' : '#a1a1aa' }} />
-                <span className="text-[11px]" style={{ fontWeight: 510, color: activeTab === "plots" ? '#fff' : '#a1a1aa' }}>
-                  Plots
+                <MessageCircle className="w-[14px] h-[14px]" style={{ color: activeTab === "history" ? '#fff' : '#a1a1aa' }} />
+                <span className="text-[11px]" style={{ fontWeight: 510, color: activeTab === "history" ? '#fff' : '#a1a1aa' }}>
+                  History
                 </span>
               </button>
             </div>
@@ -939,26 +792,22 @@ Be concise.`, true);
               {activeTab === "data" ? (
                 <DataTab
                   fileInfo={fileInfo}
-                  dataVersion={dataVersion}
-                  onVersionChange={switchVersion}
                   sessionId={sessionId}
                   onViewFullData={() => setShowFullData(true)}
                 />
               ) : (
-                <PlotsTab plots={plots} plotThemes={plotThemes} onViewPlot={(plot) => {
-                  if (plot.chartConfig && plot.chartData) {
-                    setFullscreenPlot({ title: plot.title, chartConfig: plot.chartConfig, chartData: plot.chartData, codeSnippet: plot.codeSnippet, plotId: plot.id });
-                  }
-                }} onSavePlot={(plot) => {
-                  handleSavePlotFromPanel(plot);
-                }} />
+                <div style={{ padding: 20 }}>
+                  <p style={{ fontSize: 13, color: '#a1a1aa', textAlign: 'center', marginTop: 40 }}>
+                    Session history will appear here.
+                  </p>
+                </div>
               )}
             </div>
           </GlassPanel>
         </div>
       )}
 
-      {/* Mobile: Data/Plots panel (shown when mobileView is data or plots) */}
+      {/* Mobile: Data/History panel (shown when mobileView is data or history) */}
       {isMobile && mobileView !== "chat" && (
         <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
           <GlassPanel className="flex-1" style={{ borderRadius: 0, border: 'none' }}>
@@ -966,19 +815,15 @@ Be concise.`, true);
               {mobileView === "data" ? (
                 <DataTab
                   fileInfo={fileInfo}
-                  dataVersion={dataVersion}
-                  onVersionChange={switchVersion}
                   sessionId={sessionId}
                   onViewFullData={() => setShowFullData(true)}
                 />
               ) : (
-                <PlotsTab plots={plots} plotThemes={plotThemes} onViewPlot={(plot) => {
-                  if (plot.chartConfig && plot.chartData) {
-                    setFullscreenPlot({ title: plot.title, chartConfig: plot.chartConfig, chartData: plot.chartData, codeSnippet: plot.codeSnippet, plotId: plot.id });
-                  }
-                }} onSavePlot={(plot) => {
-                  handleSavePlotFromPanel(plot);
-                }} />
+                <div style={{ padding: 20 }}>
+                  <p style={{ fontSize: 13, color: '#a1a1aa', textAlign: 'center', marginTop: 40 }}>
+                    Session history will appear here.
+                  </p>
+                </div>
               )}
             </div>
           </GlassPanel>
@@ -1272,7 +1117,6 @@ Be concise.`, true);
                               title: msg.plotTitle || "Plot",
                               chartConfig: msg.chartConfig!,
                               chartData: msg.chartData!,
-                              codeSnippet: msg.codeSnippet,
                               plotId: msg.id,
                             })}
                           >
@@ -1299,32 +1143,10 @@ Be concise.`, true);
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
-                                const code = getCodeSnippet(msg.codeSnippet, msg.plotTitle, msg.chartConfig);
-                                navigator.clipboard.writeText(code);
-                                setCopiedId(msg.id);
-                                setTimeout(() => setCopiedId(null), 2000);
-                              }}
-                              style={{
-                                display: "flex", alignItems: "center", gap: 4, padding: "2px 8px",
-                                borderRadius: 6, backgroundColor: copiedId === msg.id ? "rgba(34,197,94,0.1)" : "transparent",
-                                border: `1px solid ${copiedId === msg.id ? "rgba(34,197,94,0.3)" : "rgba(147,51,234,0.15)"}`,
-                                color: copiedId === msg.id ? "#22c55e" : "#a1a1aa",
-                                fontSize: 11, cursor: "pointer",
-                              }}
-                              onMouseEnter={(e) => { if (copiedId !== msg.id) e.currentTarget.style.backgroundColor = "rgba(147,51,234,0.1)"; }}
-                              onMouseLeave={(e) => { if (copiedId !== msg.id) e.currentTarget.style.backgroundColor = "transparent"; }}
-                            >
-                              {copiedId === msg.id ? <Check className="w-3 h-3" /> : <Code className="w-3 h-3" />}
-                              {copiedId === msg.id ? "Copied" : "Code"}
-                            </button>
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
                                 setFullscreenPlot({
                                   title: msg.plotTitle || "Plot",
                                   chartConfig: msg.chartConfig!,
                                   chartData: msg.chartData!,
-                                  codeSnippet: msg.codeSnippet,
                                   plotId: msg.id,
                                 });
                               }}
@@ -1345,33 +1167,6 @@ Be concise.`, true);
                     </div>
                   </div>
                 ))}
-                {/* Suggestion chips */}
-                {suggestions.length > 0 && !isLoading && (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxWidth: 360, marginTop: 4 }}>
-                    {suggestions.map((suggestion, idx) => (
-                      <button
-                        key={idx}
-                        onClick={() => handleSend(suggestion.text)}
-                        style={{
-                          padding: '8px 14px',
-                          borderRadius: 12,
-                          backgroundColor: 'rgba(147,51,234,0.08)',
-                          border: '1px solid rgba(147,51,234,0.2)',
-                          color: '#e4e4e7',
-                          fontSize: 12,
-                          fontWeight: 470,
-                          textAlign: 'left',
-                          cursor: 'pointer',
-                          transition: 'background-color 0.15s',
-                        }}
-                        onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.15)'}
-                        onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.08)'}
-                      >
-                        {suggestion.text}
-                      </button>
-                    ))}
-                  </div>
-                )}
                 {isLoading && (
                   <div className="flex justify-start">
                     <div className="rounded-2xl px-5 py-3.5" style={{ backgroundColor: '#1a1625' }}>
@@ -1646,7 +1441,7 @@ Be concise.`, true);
           {[
             { key: "chat" as const, icon: <MessageCircle className="w-[18px] h-[18px]" />, label: "Chat" },
             { key: "data" as const, icon: <TableProperties className="w-[18px] h-[18px]" />, label: "Data" },
-            { key: "plots" as const, icon: <BarChart3 className="w-[18px] h-[18px]" />, label: "Plots" },
+            { key: "history" as const, icon: <FileText className="w-[18px] h-[18px]" />, label: "History" },
           ].map((tab) => (
             <button
               key={tab.key}
@@ -1670,16 +1465,6 @@ Be concise.`, true);
             </button>
           ))}
         </div>
-      )}
-
-      {/* Off-screen export container for direct PNG save */}
-      {exportPlot && createPortal(
-        <div style={{ position: 'fixed', left: '-9999px', top: 0, width: 900, height: 600, pointerEvents: 'none' }}>
-          <div ref={offscreenExportRef} style={{ width: '100%', height: '100%', backgroundColor: '#1e1b2e', padding: 16 }}>
-            <Chart config={exportPlot.chartConfig} data={exportPlot.chartData} />
-          </div>
-        </div>,
-        document.body
       )}
 
       {/* Fullscreen plot modal */}
@@ -1728,30 +1513,6 @@ Be concise.`, true);
                 {fullscreenPlot.title}
               </span>
               <div style={{ display: 'flex', gap: 8, flexShrink: 0, marginLeft: 12 }}>
-                <button
-                  onClick={() => {
-                    const code = getCodeSnippet(fullscreenPlot.codeSnippet, fullscreenPlot.title, fullscreenPlot.chartConfig);
-                    navigator.clipboard.writeText(code);
-                    setCodeCopiedModal(true);
-                    setTimeout(() => setCodeCopiedModal(false), 2000);
-                  }}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 6,
-                    padding: '6px 14px',
-                    borderRadius: 8,
-                    backgroundColor: codeCopiedModal ? 'rgba(34,197,94,0.15)' : 'rgba(147,51,234,0.15)',
-                    color: codeCopiedModal ? '#22c55e' : '#e4e4e7',
-                    fontSize: 13,
-                    fontWeight: 510,
-                    border: `1px solid ${codeCopiedModal ? 'rgba(34,197,94,0.3)' : 'rgba(147,51,234,0.3)'}`,
-                    cursor: 'pointer',
-                  }}
-                >
-                  {codeCopiedModal ? <Check className="w-3.5 h-3.5" /> : <Code className="w-3.5 h-3.5" />}
-                  {codeCopiedModal ? 'Copied!' : 'Copy Code'}
-                </button>
                 <button
                   onClick={handleSavePlotPng}
                   style={{
