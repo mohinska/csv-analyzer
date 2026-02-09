@@ -433,7 +433,7 @@ function Frame8() {
     <div className="relative shrink-0 w-full">
       <div className="content-stretch flex items-start px-[20px] relative w-full">
         <div className="flex flex-[1_0_0] flex-col font-['SF_Pro:Semibold',sans-serif] font-[590] justify-center leading-[0] min-h-px min-w-px overflow-hidden relative self-stretch text-[18px] text-[rgba(0,0,0,0.85)] text-ellipsis whitespace-nowrap" style={{ fontVariationSettings: "'wdth' 100" }}>
-          <p className="leading-[normal] overflow-hidden">CSV Analyzer</p>
+          <p className="leading-[normal] overflow-hidden">AI Data Analyzer</p>
         </div>
       </div>
     </div>

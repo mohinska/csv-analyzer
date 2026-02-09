@@ -992,7 +992,7 @@ Be concise.`, true);
           {/* Title */}
           <div className="px-5 flex items-center justify-between" style={{ flexShrink: 0, marginBottom: 4 }}>
             <h2 className="text-[18px]" style={{ fontWeight: 590, color: '#e4e4e7' }}>
-              CSV Analyzer
+              AI Data Analyzer
             </h2>
             <div className="flex items-center gap-2">
               {fileInfo && (
@@ -1027,7 +1027,7 @@ Be concise.`, true);
               <div className="h-full flex flex-col items-center justify-center" style={{ padding: isMobile ? '16px' : '32px' }}>
                 <div style={{ maxWidth: 420, width: '100%', textAlign: 'center' }}>
                   <h1 style={{ fontSize: isMobile ? 22 : 26, fontWeight: 700, color: '#e4e4e7', marginBottom: 6 }}>
-                    CSV Analyzer
+                    AI Data Analyzer
                   </h1>
                   <p style={{ fontSize: 13, color: '#a1a1aa', marginBottom: 28, lineHeight: 1.5 }}>
                     {fileInfo
