@@ -16,6 +16,7 @@ class MessageResponse(BaseModel):
     id: int
     role: str
     text: str
+    type: str | None = None
     plot_title: str | None = None
     plot_data: dict[str, Any] | None = None
 

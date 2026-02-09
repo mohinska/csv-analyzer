@@ -82,6 +82,10 @@ def get_session(
 
     message_responses = []
     for i, msg in enumerate(messages, start=1):
+        # Skip reasoning messages — they're only for LLM context
+        if msg.type == "reasoning":
+            continue
+
         plot_data = None
         if msg.plot_data:
             try:
@@ -97,6 +101,7 @@ def get_session(
             id=i,
             role=msg.role,
             text=msg.text,
+            type=msg.type,
             plot_title=plot_title,
             plot_data=plot_data,
         ))

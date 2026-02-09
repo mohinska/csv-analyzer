@@ -1,10 +1,11 @@
-import { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { createPortal } from "react-dom";
 import { ArrowUp, TableProperties, BarChart3, FileText, Loader2, Upload, SquarePen, X, MessageCircle, Square, Copy, Check, Download, Sparkles, Shield, Filter, FlaskConical, LogOut } from "lucide-react";
 import { AuthPage } from "./components/AuthPage";
 import { DataTab } from "./components/DataTab";
 import { MarkdownLatex } from "./components/MarkdownLatex";
 import { VegaChart } from "./components/VegaChart";
+import { TableBlock } from "./components/TableBlock";
 
 interface FileInfo {
   filename: string;
@@ -24,9 +25,14 @@ interface Message {
   id: number;
   role: "user" | "assistant" | "system";
   text: string;
+  type?: string;
   fileName?: string;
   plotTitle?: string;
   vegaLiteSpec?: Record<string, unknown>;
+  // table fields
+  tableTitle?: string;
+  tableHeaders?: string[];
+  tableRows?: unknown[][];
 }
 
 function GlassPanel({ children, className, style }: { children: React.ReactNode; className?: string; style?: React.CSSProperties }) {
@@ -81,6 +87,24 @@ export default function App() {
   return <MainApp token={token} onLogout={handleLogout} />;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function mapRestoreMessage(msg: any): Message {
+  const base: Message = {
+    id: msg.id,
+    role: msg.role as "user" | "assistant" | "system",
+    text: msg.text,
+    type: msg.type || undefined,
+    plotTitle: msg.plot_title,
+    vegaLiteSpec: msg.plot_data?.vega_lite_spec,
+  };
+  if (msg.type === "table" && msg.plot_data) {
+    base.tableTitle = msg.text;
+    base.tableHeaders = msg.plot_data.headers;
+    base.tableRows = msg.plot_data.rows;
+  }
+  return base;
+}
+
 function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
   // Fetch wrapper that auto-logs out on 401 (expired/invalid token)
   const authFetch = async (url: string, options: RequestInit = {}) => {
@@ -130,6 +154,49 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
   const autoAnalyzePendingRef = useRef(false);
   const responseReceivedRef = useRef(false);
   const handleWSEventRef = useRef<(event: string, data: Record<string, unknown>) => void>(() => {});
+
+  // Status queue: show each status for at least 5s before switching
+  const statusQueueRef = useRef<string[]>([]);
+  const statusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastStatusTimeRef = useRef(0);
+  const STATUS_MIN_DISPLAY = 2500;
+
+  const showNextStatus = useRef(() => {
+    if (statusQueueRef.current.length === 0) {
+      statusTimerRef.current = null;
+      return;
+    }
+    const next = statusQueueRef.current.shift()!;
+    lastStatusTimeRef.current = Date.now();
+    setStatusMessage(next);
+    if (statusQueueRef.current.length > 0) {
+      statusTimerRef.current = setTimeout(() => showNextStatus.current(), STATUS_MIN_DISPLAY);
+    } else {
+      statusTimerRef.current = null;
+    }
+  }).current;
+
+  const enqueueStatus = useRef((msg: string) => {
+    const elapsed = Date.now() - lastStatusTimeRef.current;
+    if (elapsed >= STATUS_MIN_DISPLAY && !statusTimerRef.current) {
+      lastStatusTimeRef.current = Date.now();
+      setStatusMessage(msg);
+    } else {
+      statusQueueRef.current.push(msg);
+      if (!statusTimerRef.current) {
+        const delay = STATUS_MIN_DISPLAY - elapsed;
+        statusTimerRef.current = setTimeout(() => showNextStatus(), delay);
+      }
+    }
+  }).current;
+
+  const clearStatusQueue = useRef(() => {
+    if (statusTimerRef.current) {
+      clearTimeout(statusTimerRef.current);
+      statusTimerRef.current = null;
+    }
+    statusQueueRef.current.length = 0;
+  }).current;
 
   const hasContent = chatInput.trim().length > 0;
 
@@ -203,19 +270,7 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
         // Restore title + messages
         setSessionTitle(data.title || null);
         if (data.messages?.length > 0) {
-          setMessages(data.messages.map((msg: {
-            id: number;
-            role: string;
-            text: string;
-            plot_title?: string;
-            plot_data?: { vega_lite_spec?: Record<string, unknown> };
-          }) => ({
-            id: msg.id,
-            role: msg.role as "user" | "assistant" | "system",
-            text: msg.text,
-            plotTitle: msg.plot_title,
-            vegaLiteSpec: msg.plot_data?.vega_lite_spec,
-          })));
+          setMessages(data.messages.filter((m: any) => m.type !== "query_result").map(mapRestoreMessage));
         }
       } catch {
         // Session gone or expired — clear stale data, stay in upload state
@@ -294,27 +349,42 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
         ]);
         break;
 
-      case "query_result":
-        if (data.is_error) {
-          console.error("[Query Error]", data.result);
-        }
+      case "table":
+        responseReceivedRef.current = true;
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: Date.now(),
+            role: "assistant",
+            text: data.title as string,
+            type: "table",
+            tableTitle: data.title as string,
+            tableHeaders: data.headers as string[],
+            tableRows: data.rows as unknown[][],
+          },
+        ]);
         break;
 
       case "error":
         responseReceivedRef.current = true;
         console.error("[Chat Error]", data.message);
+        setMessages((prev) => [
+          ...prev,
+          { id: Date.now(), role: "assistant", text: `Error: ${data.message}` },
+        ]);
         break;
 
       case "status":
-        setStatusMessage(data.message as string);
+        enqueueStatus(data.message as string);
         break;
 
       case "done":
+        clearStatusQueue();
         setStatusMessage(null);
-        setIsLoading(false);
         if (data.data_updated) {
           refreshFileInfo();
         }
+        setIsLoading(false);
         // Safety net: no visible response received for this turn
         if (!responseReceivedRef.current) {
           setMessages((prev) => [
@@ -444,19 +514,7 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
       }
 
       if (data.messages?.length > 0) {
-        setMessages(data.messages.map((msg: {
-          id: number;
-          role: string;
-          text: string;
-          plot_title?: string;
-          plot_data?: { vega_lite_spec?: Record<string, unknown> };
-        }) => ({
-          id: msg.id,
-          role: msg.role as "user" | "assistant" | "system",
-          text: msg.text,
-          plotTitle: msg.plot_title,
-          vegaLiteSpec: msg.plot_data?.vega_lite_spec,
-        })));
+        setMessages(data.messages.filter((m: any) => m.type !== "query_result").map(mapRestoreMessage));
       } else {
         setMessages([]);
       }
@@ -1261,12 +1319,20 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
                           <span>{msg.fileName}</span>
                         </div>
                       )}
-                      <div
-                        className="text-[13px]"
-                        style={{ fontWeight: 400, color: msg.role === "user" ? '#fff' : '#e4e4e7' }}
-                      >
-                        <MarkdownLatex>{msg.text}</MarkdownLatex>
-                      </div>
+                      {msg.type === "table" && msg.tableHeaders ? (
+                        <TableBlock
+                          title={msg.tableTitle || ""}
+                          headers={msg.tableHeaders}
+                          rows={msg.tableRows || []}
+                        />
+                      ) : (
+                        <div
+                          className="text-[13px]"
+                          style={{ fontWeight: 400, color: msg.role === "user" ? '#fff' : '#e4e4e7' }}
+                        >
+                          <MarkdownLatex>{msg.text}</MarkdownLatex>
+                        </div>
+                      )}
                       {/* Copy button for assistant messages */}
                       {msg.role === "assistant" && (
                         <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity" style={{ marginTop: 6 }}>
@@ -1297,7 +1363,7 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
                       )}
                       {/* Inline chart */}
                       {msg.vegaLiteSpec && (
-                        <div className="mt-2">
+                        <div className="mt-6">
                           <div
                             className="rounded-lg overflow-hidden cursor-pointer"
                             data-chart-id={msg.id}
@@ -1310,7 +1376,7 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
                           >
                             <VegaChart spec={msg.vegaLiteSpec} />
                           </div>
-                          <div className="flex gap-[5px] mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <div className="flex gap-[5px] mt-5 opacity-0 group-hover:opacity-100 transition-opacity">
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();

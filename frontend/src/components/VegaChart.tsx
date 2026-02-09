@@ -3,7 +3,7 @@ import vegaEmbed from "vega-embed";
 
 const DARK_CONFIG = {
   background: "transparent",
-  title: { color: "#e4e4e7", fontSize: 14, fontWeight: 500 },
+  title: { color: "#e4e4e7", fontSize: 14, fontWeight: 500, offset: 16 },
   axis: {
     domainColor: "rgba(147,51,234,0.2)",
     gridColor: "rgba(147,51,234,0.1)",
