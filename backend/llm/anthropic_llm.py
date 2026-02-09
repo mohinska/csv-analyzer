@@ -68,7 +68,11 @@ PLANNER_TOOLS = [
                 },
                 "instructions": {
                     "type": "string",
-                    "description": "Additional instructions for the plot (e.g., 'sort by value descending', 'top 10 only')"
+                    "description": "Additional instructions for the plot (e.g., 'sort by value descending', 'top 10 only', 'bin by 0.05'). For histograms, pass the user's bin size here."
+                },
+                "bins": {
+                    "type": "integer",
+                    "description": "Number of bins for histograms (default 20). Use this for explicit bin count control."
                 },
                 "color": {
                     "type": "string",
@@ -102,7 +106,7 @@ class AnthropicLLM(BaseLLM):
 
         kwargs = {
             "model": self.model,
-            "max_tokens": 1024,
+            "max_tokens": 4096,
             "messages": messages,
         }
         if system:

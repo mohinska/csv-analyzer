@@ -241,6 +241,7 @@ Guidelines:
         filename: str,
         session_id: str,
         session_mgr: Optional["SessionManager"] = None,
+        max_messages: int = 0,
     ) -> AsyncGenerator[ChatEvent, None]:
         """
         Run the planner agent loop.
@@ -430,6 +431,7 @@ Use the available tools to fulfill this request. Always call finish() when done.
                         session_mgr=session_mgr,
                         chat_messages=state.chat_messages,
                         plots=plots,
+                        user_message=user_message,
                     )
 
                     # Update state based on result
@@ -490,12 +492,7 @@ Use the available tools to fulfill this request. Always call finish() when done.
                             state.run_metrics.append({"judge_response": verdict.model_dump()})
 
                             if verdict.verdict == "retry":
-                                safe_print(f"[Planner] Judge says RETRY: {verdict.feedback}")
-                                # Inject feedback into tool results so planner can self-correct
-                                tool_results[-1]["content"] += (
-                                    f"\n\nJUDGE FEEDBACK (your response had issues): {verdict.feedback}"
-                                    f"\nPlease send a corrected response via write_to_chat."
-                                )
+                                safe_print(f"[Planner] Judge RETRY (logged, no injection): {verdict.feedback}")
                             elif verdict.verdict == "warn":
                                 safe_print(f"[Planner] Judge WARN: {verdict.feedback}")
 
@@ -503,6 +500,12 @@ Use the available tools to fulfill this request. Always call finish() when done.
                                 event_type="judge",
                                 data=verdict.model_dump(),
                             )
+                        # Enforce message cap for internal requests
+                        if max_messages and len(state.chat_messages) >= max_messages:
+                            safe_print(f"[Planner] Message cap reached ({max_messages}), forcing finish.")
+                            state.finished = True
+                            break
+
                     elif tool_call.name == "generate_query":
                         if result.get("is_error"):
                             yield ChatEvent(event_type="status", data={"message": "Retrying with a different approach..."})
@@ -741,6 +744,7 @@ Use the available tools to fulfill this request. Always call finish() when done.
         session_mgr: Optional["SessionManager"],
         chat_messages: list[str],
         plots: list[PlotInfo],
+        user_message: str = "",
     ) -> dict:
         """Execute a tool and return the result."""
 
@@ -752,7 +756,7 @@ Use the available tools to fulfill this request. Always call finish() when done.
             return await self._handle_generate_query(input, df, session_id, session_mgr)
         elif name == "create_plot":
             return await self._handle_create_plot(
-                input, df, session_id, session_mgr, plots
+                input, df, session_id, session_mgr, plots, user_message
             )
         elif name == "finish":
             return {"content": "Turn completed.", "finished": True}
@@ -801,7 +805,14 @@ Use the available tools to fulfill this request. Always call finish() when done.
                 session_mgr.save_data_summary(session_id, data_summary, version="current")
 
         # Delegate to QueryMaker
-        generated = await self.query_maker.generate_query(intent, data_summary)
+        try:
+            generated = await self.query_maker.generate_query(intent, data_summary)
+        except ValueError as e:
+            safe_print(f"[Planner] Query generation failed: {e}")
+            return {
+                "content": f"Query generation failed: {e}. Try a simpler or more specific request.",
+                "is_error": True,
+            }
 
         # Evaluate code safety before execution
         safety_report = self.metrics.evaluate_code_safety(generated.code)
@@ -913,6 +924,7 @@ Use the available tools to fulfill this request. Always call finish() when done.
         session_id: str,
         session_mgr: Optional["SessionManager"],
         plots: list[PlotInfo],
+        user_message: str = "",
     ) -> dict:
         """Create a plot by preparing chart data for frontend rendering."""
         from backend.models.planner_models import ChartConfig
@@ -925,7 +937,8 @@ Use the available tools to fulfill this request. Always call finish() when done.
         x_column = input.get("x_column")
         y_column = input.get("y_column")
         color_column = input.get("color_column")
-        aggregation = input.get("aggregation", "sum")
+        aggregation = input.get("aggregation")  # None → smart inference in _prepare_chart_data
+        bins = input.get("bins")
 
         try:
             # Auto-detect columns if not provided
@@ -938,6 +951,11 @@ Use the available tools to fulfill this request. Always call finish() when done.
                 y_column = numeric_cols[0] if numeric_cols else df.columns[1] if len(df.columns) > 1 else df.columns[0]
 
             instructions = input.get("instructions")
+            # Fallback: use title then user_message as instructions hint
+            if not instructions and title:
+                instructions = title
+            if not instructions and user_message:
+                instructions = user_message
 
             # Prepare chart data based on plot type
             safe_print(f"[Planner] Preparing chart data: type={plot_type}, x={x_column}, y={y_column}, agg={aggregation}")
@@ -949,6 +967,7 @@ Use the available tools to fulfill this request. Always call finish() when done.
                 color_column=color_column,
                 aggregation=aggregation,
                 instructions=instructions,
+                bins=bins,
             )
             safe_print(f"[Planner] chart_data result: {len(chart_data) if chart_data else 0} data points")
 
@@ -959,13 +978,21 @@ Use the available tools to fulfill this request. Always call finish() when done.
                     "is_error": True
                 }
 
+            # Extract series names for multi-series charts (pivoted data)
+            series = None
+            if color_column and chart_data and plot_type in ("bar", "line", "area"):
+                first_row_keys = list(chart_data[0].keys())
+                candidate = [k for k in first_row_keys if k != x_column]
+                if len(candidate) > 1:  # Multiple series present
+                    series = candidate
+
             # Create chart config (box/heatmap use special keys)
             if plot_type == "heatmap":
                 chart_config = ChartConfig(chart_type="heatmap", x_key="x", y_key="y", color_key=None)
             elif plot_type == "box":
                 chart_config = ChartConfig(chart_type="box", x_key="name", y_key="value", color_key=color_column)
             else:
-                chart_config = ChartConfig(chart_type=plot_type, x_key=x_column, y_key=y_column, color_key=color_column)
+                chart_config = ChartConfig(chart_type=plot_type, x_key=x_column, y_key=y_column, color_key=color_column, series=series)
 
             # Create plot info
             plot_id = str(uuid.uuid4())[:8]
@@ -1054,8 +1081,9 @@ Use the available tools to fulfill this request. Always call finish() when done.
         x_column: str,
         y_column: str,
         color_column: Optional[str],
-        aggregation: str,
+        aggregation: Optional[str] = None,
         instructions: Optional[str] = None,
+        bins: Optional[int] = None,
     ) -> list[dict]:
         """Prepare chart data by running DuckDB SQL aggregations."""
         import duckdb
@@ -1079,9 +1107,33 @@ Use the available tools to fulfill this request. Always call finish() when done.
                     col_data = df[x_column].dropna()
                     if len(col_data) == 0:
                         return []
-                    counts, bin_edges = np.histogram(col_data, bins=20)
+
+                    # Use explicit bins param, or parse from instructions
+                    import re as _re
+                    n_bins = bins or 20
+                    if not bins and instructions:
+                        bin_match = _re.search(r'bin(?:ned|s|_size)?\s*(?:by|of|=|:)?\s*([\d.]+)', instructions, _re.IGNORECASE)
+                        if bin_match:
+                            bin_size = float(bin_match.group(1))
+                            if bin_size > 0:
+                                data_range = col_data.max() - col_data.min()
+                                n_bins = max(1, int(np.ceil(data_range / bin_size)))
+
+                    counts, bin_edges = np.histogram(col_data, bins=n_bins)
+
+                    # Auto-detect decimal precision from bin width
+                    bin_width = bin_edges[1] - bin_edges[0] if len(bin_edges) > 1 else 1
+                    if bin_width >= 1:
+                        precision = 0
+                    elif bin_width >= 0.1:
+                        precision = 1
+                    elif bin_width >= 0.01:
+                        precision = 2
+                    else:
+                        precision = 3
+
                     return [
-                        {x_column: f"{bin_edges[i]:.1f}-{bin_edges[i+1]:.1f}", "count": int(counts[i])}
+                        {x_column: f"{bin_edges[i]:.{precision}f}-{bin_edges[i+1]:.{precision}f}", "count": int(counts[i])}
                         for i in range(len(counts))
                     ]
                 else:
@@ -1172,21 +1224,72 @@ Use the available tools to fulfill this request. Always call finish() when done.
 
             else:
                 # Bar, line, area - aggregate data
-                agg = aggregation or "sum"
+                import re as _re
+
+                # Smart aggregation inference
+                if aggregation:
+                    agg = aggregation
+                elif x_column == y_column:
+                    agg = "count"
+                elif not pd.api.types.is_numeric_dtype(df[y_column]):
+                    agg = "count"
+                else:
+                    agg = "mean"
 
                 if pd.api.types.is_numeric_dtype(df[y_column]):
                     x_is_unique = df[x_column].nunique() == len(df)
 
+                    # Auto-detect time/date column for ascending sort
+                    is_time_col = bool(_re.search(
+                        r'(year|date|month|week|time|quarter|period|day)',
+                        x_column, _re.IGNORECASE
+                    )) or pd.api.types.is_datetime64_any_dtype(df[x_column])
+
                     if color_column and color_column != x_column:
-                        sql = f"SELECT CAST({q(x_column)} AS VARCHAR) AS {q(x_column)}, CAST({q(color_column)} AS VARCHAR) AS {q(color_column)}, {agg}({q(y_column)}) AS {q(y_column)} FROM df GROUP BY {q(x_column)}, {q(color_column)} LIMIT 100"
+                        sql = f"SELECT CAST({q(x_column)} AS VARCHAR) AS {q(x_column)}, CAST({q(color_column)} AS VARCHAR) AS {q(color_column)}, {agg}({q(y_column)}) AS {q(y_column)} FROM df GROUP BY {q(x_column)}, {q(color_column)} LIMIT 200"
+                        result = conn.execute(sql).fetchdf()
+
+                        # Pivot for Recharts: flat → {x: "val", series1: num, series2: num}
+                        if not result.empty:
+                            pivot = result.pivot_table(
+                                index=x_column, columns=color_column,
+                                values=y_column, fill_value=0
+                            ).reset_index()
+                            # Sort: time columns ascending
+                            if is_time_col:
+                                try:
+                                    pivot = pivot.sort_values(
+                                        x_column,
+                                        key=lambda s: pd.to_numeric(s, errors='coerce')
+                                    )
+                                except Exception:
+                                    pivot = pivot.sort_values(x_column)
+                            records = []
+                            for _, row in pivot.iterrows():
+                                point = {x_column: str(row[x_column])}
+                                for col in pivot.columns:
+                                    if col != x_column:
+                                        point[str(col)] = self._safe_float(row[col])
+                                records.append(point)
+                            return records
+                        return []
+
                     elif x_is_unique:
-                        sql = f"SELECT CAST({q(x_column)} AS VARCHAR) AS {q(x_column)}, {q(y_column)} FROM df WHERE {q(y_column)} IS NOT NULL LIMIT 50"
+                        sql = f"SELECT CAST({q(x_column)} AS VARCHAR) AS {q(x_column)}, {q(y_column)} FROM df WHERE {q(y_column)} IS NOT NULL"
+                        if is_time_col:
+                            sql += f" ORDER BY {q(x_column)} ASC"
+                        sql += " LIMIT 50"
                     else:
                         sql = f"SELECT CAST({q(x_column)} AS VARCHAR) AS {q(x_column)}, {agg}({q(y_column)}) AS {q(y_column)} FROM df GROUP BY {q(x_column)}"
 
-                        # Apply instructions via SQL ORDER BY / LIMIT
+                        # Apply instructions or auto-sort
                         order_clause, limit_val = self._instructions_to_sql(y_column, instructions)
-                        sql += order_clause
+                        if order_clause:
+                            sql += order_clause
+                        elif is_time_col:
+                            sql += f" ORDER BY {q(x_column)} ASC"
+                        elif plot_type == "bar":
+                            sql += f' ORDER BY {q(y_column)} DESC'
                         sql += f" LIMIT {limit_val}"
 
                     result = conn.execute(sql).fetchdf()
@@ -1194,8 +1297,6 @@ Use the available tools to fulfill this request. Always call finish() when done.
                     records = []
                     for _, row in result.iterrows():
                         point = {x_column: str(row[x_column]), y_column: self._safe_float(row[y_column])}
-                        if color_column and color_column in result.columns:
-                            point[color_column] = str(row[color_column])
                         records.append(point)
                     return records
                 else:

@@ -9,12 +9,12 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
 
     # LLM Settings
-    classifier_model: str = "claude-haiku-4-5-20251001"
+    classifier_model: str = "claude-sonnet-4-5-20250929"
     use_mock_llm: bool = False  # Set to True for testing without API
 
     # LLM Judge Settings
     judge_enabled: bool = True
-    judge_model: str = "claude-haiku-4-5-20251001"
+    judge_model: str = "claude-sonnet-4-5-20250929"
 
     # Server Settings
     host: str = "0.0.0.0"

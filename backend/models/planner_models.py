@@ -46,6 +46,7 @@ class ChartConfig(BaseModel):
     x_key: str
     y_key: str
     color_key: Optional[str] = None
+    series: Optional[list[str]] = None  # Series names for multi-series (grouped) charts
 
 
 class PlotInfo(BaseModel):

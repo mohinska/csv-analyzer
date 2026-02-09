@@ -486,14 +486,6 @@ export default function App() {
 
       case "error":
         console.error("[Chat Error]", data.message);
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: Date.now(),
-            role: "assistant",
-            text: "Something went wrong while processing your request. Please try again or rephrase your question.",
-          },
-        ]);
         break;
 
       case "judge": {
@@ -626,10 +618,11 @@ export default function App() {
 Perform a comprehensive first-look analysis of this dataset. Use multiple short messages. Include:
 - Brief overview of what the data is about
 - Column dictionary as a markdown table (# | Column | Type | Description | Example Values)
-- Key statistics table for numeric columns (Variable | Min | Max | Mean | Median | Missing)
-- Data quality check (missing values, duplicates, type issues, anomalies)
-- 2-3 key insights and 1 hypothesis
-- 1 chart max — only if truly insightful`, true);
+- A few insights about the data. Be brief here
+
+Send these three as separate messages. 
+Don't add anything outside of this scope.
+Be concise.`, true);
         } catch (error) {
           // Fallback to simple system message if chat fails
           console.error("Auto-summary failed:", error);
@@ -1266,28 +1259,6 @@ Perform a comprehensive first-look analysis of this dataset. Use multiple short 
                               <><Copy className="w-3 h-3" /> Copy</>
                             )}
                           </button>
-                          {msg.judgeVerdict && (
-                            <div
-                              className="flex items-center gap-1.5"
-                              style={{ fontSize: 10, color: '#71717a' }}
-                              title={`Quality: ${msg.judgeVerdict.verdict}\nRelevance: ${msg.judgeVerdict.relevance}/10\nAccuracy: ${msg.judgeVerdict.accuracy}/10\nCompleteness: ${msg.judgeVerdict.completeness}/10\n${msg.judgeVerdict.feedback}`}
-                            >
-                              <div
-                                style={{
-                                  width: 6,
-                                  height: 6,
-                                  borderRadius: '50%',
-                                  backgroundColor:
-                                    msg.judgeVerdict.verdict === "pass" ? '#22c55e' :
-                                    msg.judgeVerdict.verdict === "warn" ? '#eab308' :
-                                    '#ef4444',
-                                }}
-                              />
-                              <span>
-                                {msg.judgeVerdict.relevance + msg.judgeVerdict.accuracy + msg.judgeVerdict.completeness}/30
-                              </span>
-                            </div>
-                          )}
                         </div>
                       )}
                       {/* Inline chart */}

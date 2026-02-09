@@ -17,6 +17,7 @@ from backend.services.query_executor import get_query_executor, QueryExecutor
 from backend.services.llm_judge import LLMJudge
 from backend.agents.prompt_polisher import PromptPolisher
 import pandas as pd
+import re
 
 router = APIRouter()
 
@@ -479,18 +480,18 @@ async def chat(
     # Initialize components
     query_maker = QueryMaker(llm)
 
-    # Initialize LLM judge if enabled
+    # Initialize LLM judge if enabled (skip for internal auto-analysis)
     settings = get_settings()
     judge = None
-    if settings.judge_enabled and not settings.should_use_mock:
+    if settings.judge_enabled and not settings.should_use_mock and not request.internal:
         judge_llm = AnthropicLLM(
             model=settings.judge_model,
             api_key=settings.anthropic_api_key,
         )
         judge = LLMJudge(judge_llm)
 
-    # Initialize prompt polisher (uses same LLM)
-    polisher = PromptPolisher(llm) if not settings.should_use_mock else None
+    # Initialize prompt polisher (skip for internal auto-analysis)
+    polisher = PromptPolisher(llm) if not settings.should_use_mock and not request.internal else None
 
     # Create planner with all dependencies
     planner = PlannerAgent(
@@ -501,7 +502,16 @@ async def chat(
         prompt_polisher=polisher,
     )
 
-    safe_print(f"[Routes] /chat called: session={request.session_id}, message='{request.message[:50]}...'")
+    # Parse message cap from internal instructions (e.g. "Send these three as separate messages")
+    max_messages = 0
+    if request.internal:
+        word_to_num = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6}
+        m = re.search(r'(?:send|exactly)\s+(?:these\s+)?(\w+)\s+(?:as\s+)?(?:separate\s+)?messages', request.message, re.IGNORECASE)
+        if m:
+            val = m.group(1)
+            max_messages = word_to_num.get(val.lower(), 0) or int(val) if val.isdigit() else 0
+
+    safe_print(f"[Routes] /chat called: session={request.session_id}, message='{request.message[:50]}...', max_messages={max_messages}")
 
     if request.stream:
         # SSE streaming response
@@ -517,6 +527,7 @@ async def chat(
                     filename=session.filename,
                     session_id=request.session_id,
                     session_mgr=session_mgr,
+                    max_messages=max_messages,
                 ):
                     safe_print(f"[Routes] Got event: {event.event_type}")
                     # Check for data updates in done event
@@ -561,6 +572,7 @@ async def chat(
             filename=session.filename,
             session_id=request.session_id,
             session_mgr=session_mgr,
+            max_messages=max_messages,
         ):
             events.append(event.model_dump())
 

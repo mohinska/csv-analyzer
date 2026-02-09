@@ -10,6 +10,7 @@ export interface ChartConfig {
   x_key: string;
   y_key: string;
   color_key?: string | null;
+  series?: string[] | null;
 }
 
 export interface ChartTheme {
@@ -130,7 +131,8 @@ export function Chart({ config, data, thumbnail = false, theme }: ChartProps) {
 
   switch (chart_type) {
     case "bar":
-    case "histogram":
+    case "histogram": {
+      const seriesKeys = config.series && config.series.length > 0 ? config.series : null;
       return (
         <ResponsiveContainer width="100%" height="100%">
           <BarChart data={data} margin={margin}>
@@ -147,12 +149,20 @@ export function Chart({ config, data, thumbnail = false, theme }: ChartProps) {
             />
             <YAxis {...axisProps} hide={thumbnail} width={thumbnail ? 0 : 55} label={yAxisLabel} />
             {!thumbnail && <Tooltip {...tooltipStyle} />}
-            <Bar dataKey={actualYKey} fill={mainColor} radius={[3, 3, 0, 0]} />
+            {seriesKeys
+              ? seriesKeys.map((key, i) => (
+                  <Bar key={key} dataKey={key} fill={CHART_COLORS[i % CHART_COLORS.length]} radius={[3, 3, 0, 0]} />
+                ))
+              : <Bar dataKey={actualYKey} fill={mainColor} radius={[3, 3, 0, 0]} />
+            }
+            {seriesKeys && !thumbnail && <Legend wrapperStyle={{ color: "#a1a1aa", fontSize: 11 }} />}
           </BarChart>
         </ResponsiveContainer>
       );
+    }
 
-    case "line":
+    case "line": {
+      const seriesKeys = config.series && config.series.length > 0 ? config.series : null;
       return (
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={data} margin={margin}>
@@ -160,18 +170,33 @@ export function Chart({ config, data, thumbnail = false, theme }: ChartProps) {
             <XAxis dataKey={x_key} {...axisProps} hide={thumbnail} label={xAxisLabel} height={thumbnail ? 0 : 40} />
             <YAxis {...axisProps} hide={thumbnail} width={thumbnail ? 0 : 55} label={yAxisLabel} />
             {!thumbnail && <Tooltip {...tooltipStyle} />}
-            <Line
-              type="monotone"
-              dataKey={actualYKey}
-              stroke={mainColor}
-              strokeWidth={2}
-              dot={thumbnail ? false : { fill: mainColor, r: 2 }}
-            />
+            {seriesKeys
+              ? seriesKeys.map((key, i) => (
+                  <Line
+                    key={key}
+                    type="monotone"
+                    dataKey={key}
+                    stroke={CHART_COLORS[i % CHART_COLORS.length]}
+                    strokeWidth={2}
+                    dot={thumbnail ? false : { fill: CHART_COLORS[i % CHART_COLORS.length], r: 2 }}
+                  />
+                ))
+              : <Line
+                  type="monotone"
+                  dataKey={actualYKey}
+                  stroke={mainColor}
+                  strokeWidth={2}
+                  dot={thumbnail ? false : { fill: mainColor, r: 2 }}
+                />
+            }
+            {seriesKeys && !thumbnail && <Legend wrapperStyle={{ color: "#a1a1aa", fontSize: 11 }} />}
           </LineChart>
         </ResponsiveContainer>
       );
+    }
 
-    case "area":
+    case "area": {
+      const seriesKeys = config.series && config.series.length > 0 ? config.series : null;
       return (
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={data} margin={margin}>
@@ -179,15 +204,28 @@ export function Chart({ config, data, thumbnail = false, theme }: ChartProps) {
             <XAxis dataKey={x_key} {...axisProps} hide={thumbnail} label={xAxisLabel} height={thumbnail ? 0 : 40} />
             <YAxis {...axisProps} hide={thumbnail} width={thumbnail ? 0 : 55} label={yAxisLabel} />
             {!thumbnail && <Tooltip {...tooltipStyle} />}
-            <Area
-              type="monotone"
-              dataKey={actualYKey}
-              stroke={mainColor}
-              fill={`${mainColor}4D`}
-            />
+            {seriesKeys
+              ? seriesKeys.map((key, i) => (
+                  <Area
+                    key={key}
+                    type="monotone"
+                    dataKey={key}
+                    stroke={CHART_COLORS[i % CHART_COLORS.length]}
+                    fill={`${CHART_COLORS[i % CHART_COLORS.length]}4D`}
+                  />
+                ))
+              : <Area
+                  type="monotone"
+                  dataKey={actualYKey}
+                  stroke={mainColor}
+                  fill={`${mainColor}4D`}
+                />
+            }
+            {seriesKeys && !thumbnail && <Legend wrapperStyle={{ color: "#a1a1aa", fontSize: 11 }} />}
           </AreaChart>
         </ResponsiveContainer>
       );
+    }
 
     case "scatter": {
       // Compute linear regression trend line
