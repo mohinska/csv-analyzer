@@ -9,69 +9,124 @@ Built with a **FastAPI** backend using **Claude (Anthropic)** as the reasoning e
 ## Features
 
 - **Natural language data analysis** — ask questions in plain English (or Ukrainian), get instant answers with tables, statistics, and insights
-- **Interactive visualizations** — bar, line, scatter, histogram, pie, box, and heatmap charts rendered with Recharts
+- **Interactive visualizations** — bar, line, scatter, histogram, pie, box, heatmap, and area charts rendered with Recharts, with multi-series (grouped) support
 - **File support** — CSV and Parquet uploads with automatic type detection
 - **Agentic architecture** — Planner agent autonomously decides what queries to run, what charts to create, and how to present findings
 - **Streaming responses** — Server-Sent Events for real-time message delivery with live status updates
 - **Data transformations** — clean data, add columns, filter rows — changes persist in session
-- **Chart export** — save any visualization as PNG or copy the Python code behind it
+- **Chart customization** — change colors, backgrounds; export any chart as PNG or copy the Python code behind it
 - **Data export** — export current (transformed) or original data as CSV
-- **Sandboxed execution** — pandas queries run in a restricted `exec()` environment with no file/network access
+- **DuckDB SQL engine** — fast analytical queries with full SQL support (window functions, CTEs, statistical aggregates)
+- **LLM Judge** — per-message quality evaluation for relevance, accuracy, and completeness
 - **Session management** — each upload creates an isolated session with its own data and conversation history
-- **Smart suggestions** — after upload, get AI-generated prompt suggestions based on your data's columns and types
+- **Smart suggestions** — after upload, get AI-generated prompt suggestions based on your data
 - **LaTeX math rendering** — statistical formulas and equations rendered with KaTeX
 - **Markdown tables** — query results displayed as formatted, scrollable tables
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+- Python 3.11+
+- Node.js 18+
+- An [Anthropic API key](https://console.anthropic.com/)
+
+### 1. Clone and configure
+
+```bash
+git clone <repo-url>
+cd csv-analyzer
+
+# Create .env in the root directory
+echo "ANTHROPIC_API_KEY=your-api-key-here" > .env
+```
+
+### 2. Backend
+
+```bash
+# Create virtual environment
+python3 -m venv venv
+source venv/bin/activate      # Mac/Linux
+# venv\Scripts\activate       # Windows
+
+# Install dependencies
+pip install -r backend/requirements.txt
+
+# Run (from root directory, not from backend/)
+python3 -m backend.main
+```
+
+Backend runs at **http://localhost:8001**
+
+### 3. Frontend
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Frontend runs at **http://localhost:3000**
+
+Open http://localhost:3000, upload a CSV or Parquet file, and start chatting.
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                   React Frontend                     │
-│  App.tsx ← SSE stream ← /api/chat                   │
-│  DataTab  │  PlotsTab  │  Chat panel                 │
-└────────────────────┬────────────────────────────────┘
-                     │ HTTP + SSE
-┌────────────────────▼────────────────────────────────┐
-│                  FastAPI Backend                      │
-│                                                      │
-│  routes.py ──► Planner Agent (agentic loop)          │
-│                    │                                 │
-│          ┌────────┼────────┬──────────┐              │
-│          ▼        ▼        ▼          ▼              │
-│    write_to_chat  query   create_plot  finish         │
-│                  maker                                │
-│                    │                                 │
-│            QueryExecutor (sandboxed pandas)           │
-│                    │                                 │
-│             SessionManager (disk persistence)        │
-└──────────────────────────────────────────────────────┘
++---------------------------------------------------------+
+|                   React Frontend (:3000)                 |
+|  App.tsx <- SSE stream <- /api/chat                      |
+|  DataTab  |  PlotsTab  |  Chat panel                     |
++----------------------------+----------------------------+
+                             | HTTP + SSE (proxied via Vite)
++----------------------------v----------------------------+
+|                  FastAPI Backend (:8001)                  |
+|                                                          |
+|  routes.py --> PromptPolisher --> Planner Agent (loop)    |
+|                                      |                   |
+|              +----------+------------+--------+          |
+|              v          v            v        v          |
+|        write_to_chat  generate    create    finish        |
+|                       _query      _plot                   |
+|                         |                                |
+|                    QueryMaker (LLM -> DuckDB SQL)        |
+|                         |                                |
+|                  QueryExecutor (DuckDB)                   |
+|                         |                                |
+|                    LLM Judge (quality eval)               |
+|                         |                                |
+|                  SessionManager (disk)                    |
++----------------------------------------------------------+
 ```
 
-### Backend
+### Backend Components
 
 | Component | File | Description |
 |-----------|------|-------------|
-| **Planner Agent** | `agents/planner.py` | Agentic loop — calls Claude with tools, executes tool results, streams events to frontend |
-| **Query Maker** | `agents/query_maker.py` | Generates pandas code from natural language intent |
-| **Prompt Polisher** | `agents/prompt_polisher.py` | Refines user prompts before sending to LLM |
-| **Query Executor** | `services/query_executor.py` | Sandboxed `exec()` for pandas operations with safety checks |
-| **Session Manager** | `services/session_manager.py` | Manages per-session data files, chat history, and plot metadata |
-| **Metrics Evaluator** | `services/metrics_evaluator.py` | Evaluates query result quality (hallucination checks, FAIL detection) |
+| **Planner Agent** | `agents/planner.py` | Agentic loop — calls Claude with tools, executes results, prepares chart data, streams events |
+| **Query Maker** | `agents/query_maker.py` | Generates DuckDB SQL from natural language intent |
+| **Prompt Polisher** | `agents/prompt_polisher.py` | Validates and classifies user prompts before the planner |
+| **Query Executor** | `services/query_executor.py` | Executes DuckDB SQL against the session DataFrame |
+| **LLM Judge** | `services/llm_judge.py` | Evaluates response quality (relevance, accuracy, completeness) |
+| **Metrics Evaluator** | `services/metrics_evaluator.py` | Checks query results for quality issues and hallucinations |
+| **Session Manager** | `services/session_manager.py` | Per-session data files, chat history, and plot metadata |
 | **Anthropic LLM** | `llm/anthropic_llm.py` | Claude API wrapper with tool-use support |
 | **Mock LLM** | `llm/mock_llm.py` | Testing without API key — returns canned responses |
 | **API Routes** | `api/routes.py` | All FastAPI endpoints — upload, chat (SSE), preview, plots, etc. |
 | **Config** | `config.py` | Pydantic settings — API key, model, port, CORS |
 
-### Frontend
+### Frontend Components
 
 | Component | File | Description |
 |-----------|------|-------------|
 | **App** | `src/App.tsx` | Main app — chat panel, SSE handling, file upload, state management |
 | **DataTab** | `src/components/DataTab.tsx` | Left panel data table with sort, filter, search, version switching, CSV export |
 | **PlotsTab** | `src/components/PlotsTab.tsx` | Plot gallery with view, code copy, and PNG download |
-| **Chart** | `src/components/Chart.tsx` | Recharts wrapper supporting all chart types with customization |
+| **Chart** | `src/components/Chart.tsx` | Recharts wrapper — bar, line, area, scatter, histogram, pie, box, heatmap with multi-series support |
 | **MarkdownLatex** | `src/components/MarkdownLatex.tsx` | Markdown + LaTeX renderer for chat messages |
 
 ---
@@ -81,8 +136,9 @@ Built with a **FastAPI** backend using **Claude (Anthropic)** as the reasoning e
 **Backend:**
 - Python 3.11+
 - FastAPI + Uvicorn
-- Anthropic Claude API (claude-haiku-4-5 by default)
-- Pandas for data manipulation
+- Anthropic Claude API (claude-sonnet-4-5 by default)
+- DuckDB for analytical SQL queries
+- Pandas for data loading and transformations
 - Pydantic v2 for validation
 
 **Frontend:**
@@ -96,102 +152,19 @@ Built with a **FastAPI** backend using **Claude (Anthropic)** as the reasoning e
 
 ---
 
-## Quick Start
+## Configuration
 
-### 1. Backend
-
-```bash
-cd backend
-
-# Create virtual environment
-python -m venv venv
-venv\Scripts\activate        # Windows
-# source venv/bin/activate   # Mac/Linux
-
-# Install dependencies
-pip install -r requirements.txt
-```
-
-### 2. Configure API Key
-
-Create a `.env` file in the **root** directory:
+The `.env` file in the project root configures the backend:
 
 ```env
-ANTHROPIC_API_KEY=your-api-key-here
-```
+ANTHROPIC_API_KEY=your-api-key-here    # Required
 
-Optional settings:
-
-```env
-CLASSIFIER_MODEL=claude-haiku-4-5-20251001   # LLM model to use
-USE_MOCK_LLM=true                             # Test without API key
-DEBUG=true                                    # Enable debug mode
-```
-
-### 3. Run Backend
-
-```bash
-# From root directory
-python -m backend.main
-```
-
-Backend runs at **http://localhost:8001**
-
-### 4. Run Frontend
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-Frontend runs at **http://localhost:5173**
-
----
-
-## Project Structure
-
-```
-agent-forge/
-├── backend/
-│   ├── agents/
-│   │   ├── planner.py            # Main agentic loop with tool execution
-│   │   ├── query_maker.py        # Natural language → pandas code
-│   │   └── prompt_polisher.py    # Prompt refinement
-│   ├── api/
-│   │   └── routes.py             # All API endpoints
-│   ├── llm/
-│   │   ├── base.py               # Abstract LLM interface
-│   │   ├── anthropic_llm.py      # Claude API implementation
-│   │   └── mock_llm.py           # Mock for testing
-│   ├── models/
-│   │   └── planner_models.py     # Pydantic schemas (ToolCall, ChatEvent, PlotInfo, etc.)
-│   ├── prompts/
-│   │   └── planner_system.txt    # System prompt for the Planner agent
-│   ├── services/
-│   │   ├── session_manager.py    # Session data persistence
-│   │   ├── query_executor.py     # Sandboxed pandas execution
-│   │   └── metrics_evaluator.py  # Result quality evaluation
-│   ├── config.py                 # App settings (Pydantic)
-│   ├── main.py                   # Uvicorn entry point
-│   └── requirements.txt
-│
-├── frontend/
-│   ├── src/
-│   │   ├── App.tsx               # Main application
-│   │   ├── main.tsx              # React entry point
-│   │   ├── index.css             # Global styles + animations
-│   │   └── components/
-│   │       ├── Chart.tsx         # Recharts chart wrapper
-│   │       ├── DataTab.tsx       # Data table panel
-│   │       ├── PlotsTab.tsx      # Plot gallery panel
-│   │       └── MarkdownLatex.tsx # Markdown + LaTeX renderer
-│   ├── package.json
-│   └── vite.config.ts
-│
-├── .env                          # API keys (create this)
-├── .env.example                  # Template
-└── README.md
+# Optional
+CLASSIFIER_MODEL=claude-sonnet-4-5-20250929   # LLM model for the planner
+JUDGE_MODEL=claude-sonnet-4-5-20250929        # LLM model for quality evaluation
+JUDGE_ENABLED=true                             # Enable/disable LLM Judge
+USE_MOCK_LLM=false                             # Test without API key
+DEBUG=true                                     # Enable debug logging
 ```
 
 ---
@@ -218,21 +191,22 @@ agent-forge/
 ## How It Works
 
 1. **Upload** — user uploads a CSV or Parquet file, creating a new session
-2. **Chat** — user types a question in natural language
-3. **Planner Agent** receives the message along with a data summary and available tools
-4. **Tool loop** — the agent decides which tools to call:
+2. **Auto-analysis** — an initial analysis runs automatically, providing key stats and insights
+3. **Chat** — user types a question in natural language
+4. **Planner Agent** receives the message along with a data summary and available tools
+5. **Tool loop** — the agent decides which tools to call:
    - `write_to_chat(text)` — sends a message to the user (streamed via SSE)
-   - `generate_query(intent)` — generates and executes pandas code against the dataset
-   - `create_plot(...)` — creates a chart configuration sent to the frontend for rendering
+   - `generate_query(intent)` — generates and executes DuckDB SQL against the dataset
+   - `create_plot(...)` — prepares chart data (aggregation, pivoting, sorting) sent to the frontend for Recharts rendering
    - `finish()` — ends the current turn
-5. **Streaming** — all events are streamed to the frontend via SSE as they happen
-6. **Data mutations** — if a query modifies the DataFrame (new columns, filtered rows, etc.), the updated data is persisted and the frontend refreshes
+6. **Streaming** — all events are streamed to the frontend via SSE as they happen
+7. **Data mutations** — if a query modifies the DataFrame, the updated data is persisted and the frontend refreshes
 
 ---
 
 ## Security
 
-- **Sandboxed execution** — pandas queries run via `exec()` with restricted `__builtins__` (no `open`, `import`, `eval`, `exec`, `os`, `sys`, `subprocess`)
+- **SQL sanitization** — generated DuckDB queries are validated; DDL/DML statements (DROP, DELETE, INSERT, etc.) are blocked
+- **Plot code sanitization** — generated matplotlib code is stripped of imports, `exec()`, `eval()`, `open()`, and other dangerous patterns
 - **Session isolation** — each session has its own data directory under `data/sessions/`
-- **No file system access** — generated code cannot read or write files outside the sandbox
 - **Input validation** — Pydantic models validate all API inputs
