@@ -82,6 +82,19 @@ export default function App() {
 }
 
 function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
+  // Fetch wrapper that auto-logs out on 401 (expired/invalid token)
+  const authFetch = async (url: string, options: RequestInit = {}) => {
+    const response = await fetch(url, {
+      ...options,
+      headers: { ...options.headers as Record<string, string>, Authorization: `Bearer ${token}` },
+    });
+    if (response.status === 401) {
+      onLogout();
+      throw new Error("Session expired. Please log in again.");
+    }
+    return response;
+  };
+
   const [activeTab, setActiveTab] = useState<"data" | "history">("data");
   const [chatInput, setChatInput] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
@@ -170,9 +183,7 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
       if (!savedSessionId) return; // No session to restore — stay in upload state
 
       try {
-        const response = await fetch(`/api/sessions/${savedSessionId}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
+        const response = await authFetch(`/api/sessions/${savedSessionId}`);
         if (!response.ok) throw new Error("Session not found");
 
         const data = await response.json();
@@ -235,9 +246,8 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
     const formData = new FormData();
     formData.append("file", file);
 
-    const response = await fetch("/api/upload", {
+    const response = await authFetch("/api/upload", {
       method: "POST",
-      headers: { Authorization: `Bearer ${token}` },
       body: formData,
     });
 
@@ -400,9 +410,7 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
   useEffect(() => {
     const fetchSessions = async () => {
       try {
-        const response = await fetch("/api/sessions", {
-          headers: { Authorization: `Bearer ${token}` },
-        });
+        const response = await authFetch("/api/sessions");
         if (response.ok) {
           const data = await response.json();
           setSessions(data);
@@ -417,9 +425,7 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
     if (id === sessionId || loadingSessionId) return;
     setLoadingSessionId(id);
     try {
-      const response = await fetch(`/api/sessions/${id}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const response = await authFetch(`/api/sessions/${id}`);
       if (!response.ok) throw new Error("Session not found");
       const data = await response.json();
 
@@ -465,10 +471,7 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
   const deleteSession = async (id: string) => {
     setDeletingSessionId(id);
     try {
-      await fetch(`/api/sessions/${id}`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      await authFetch(`/api/sessions/${id}`, { method: "DELETE" });
       setSessions((prev) => prev.filter((s) => s.id !== id));
       if (id === sessionId) {
         handleNewChat();
@@ -483,9 +486,7 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
     if (!sessionId) return;
 
     try {
-      const response = await fetch(`/api/sessions/${sessionId}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const response = await authFetch(`/api/sessions/${sessionId}`);
       if (response.ok) {
         const data = await response.json();
         if (data.file) {
