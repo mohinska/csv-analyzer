@@ -70,21 +70,40 @@ TOOL_DEFINITIONS = [
     {
         "name": "create_plot",
         "description": (
-            "Create a visualization using Vega-Lite. The spec must be a valid Vega-Lite v5 JSON specification. "
-            "Do NOT include a $schema field. "
-            "Include the data inline as data.values (array of objects). "
-            "Always aggregate data with sql_query first — keep data.values under 100 rows. "
+            "Create an interactive visualization using Plotly.js. "
+            "The spec must be a JSON object with 'data' (array of trace objects) and optional 'layout'. "
+            "Include data inline in each trace (x, y arrays for cartesian; values+labels for pie). "
+            "Always aggregate data with sql_query first — keep data arrays under 100 elements. "
             "Use field names matching your query results. "
-            "Keep specs simple: bar, line, scatter, histogram, boxplot, heatmap. "
-            "Use 'width': 'container' for responsive sizing."
+            "Chart types: bar (type:'bar'), line (type:'scatter', mode:'lines'), scatter (type:'scatter', mode:'markers'), "
+            "histogram (type:'histogram'), box (type:'box'), pie (type:'pie' with labels+values), heatmap (type:'heatmap'). "
+            "For heatmaps (including correlation matrices): provide z (2D array), x (column labels), y (row labels). "
+            "The frontend auto-annotates heatmap cells with values and applies a purple colorscale. "
+            "For horizontal bars set orientation:'h'. "
+            "Do NOT set colors, fonts, paper_bgcolor, or plot_bgcolor — the frontend applies a consistent dark purple theme automatically. "
+            "In layout, only set axis titles (xaxis.title, yaxis.title) and barmode if needed."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "title": {"type": "string", "description": "Chart title"},
-                "vega_lite_spec": {"type": "object", "description": "Vega-Lite v5 spec (with inline data.values)"},
+                "plotly_spec": {
+                    "type": "object",
+                    "description": "Plotly.js spec with 'data' (array of traces) and optional 'layout'",
+                    "properties": {
+                        "data": {
+                            "type": "array",
+                            "description": "Array of Plotly trace objects",
+                        },
+                        "layout": {
+                            "type": "object",
+                            "description": "Optional Plotly layout (axis titles, barmode, etc.)",
+                        },
+                    },
+                    "required": ["data"],
+                },
             },
-            "required": ["title", "vega_lite_spec"],
+            "required": ["title", "plotly_spec"],
         },
     },
     {
@@ -464,7 +483,7 @@ async def _execute_tool_core(
     elif tool_name == "create_plot":
         return await execute_create_plot(
             title=tool_input["title"],
-            vega_lite_spec=tool_input["vega_lite_spec"],
+            plotly_spec=tool_input["plotly_spec"],
             send_event=send_event,
         )
 
@@ -529,7 +548,7 @@ def _persist_tool_result(
             text=tool_input["title"],
             plot_data=json.dumps({
                 "title": tool_input["title"],
-                "vega_lite_spec": tool_input["vega_lite_spec"],
+                "plotly_spec": tool_input["plotly_spec"],
             }),
         )
     # finalize doesn't need persistence — it updates session title inline

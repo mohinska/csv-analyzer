@@ -45,8 +45,8 @@ class TestSaveToolMessage:
         assert msg.text == "The average score is 85."
 
     def test_plot_saved_with_plot_data_json(self, db, sample_session):
-        spec = {"mark": "bar", "encoding": {}}
-        plot_data = json.dumps({"title": "Revenue Chart", "vega_lite_spec": spec})
+        spec = {"data": [{"type": "bar", "x": ["A", "B"], "y": [10, 20]}], "layout": {}}
+        plot_data = json.dumps({"title": "Revenue Chart", "plotly_spec": spec})
         save_tool_message(
             db=db,
             session_id=sample_session.id,
@@ -59,7 +59,7 @@ class TestSaveToolMessage:
         assert msg.type == "plot"
         parsed = json.loads(msg.plot_data)
         assert parsed["title"] == "Revenue Chart"
-        assert parsed["vega_lite_spec"]["mark"] == "bar"
+        assert parsed["plotly_spec"]["data"][0]["type"] == "bar"
 
     def test_query_result_saved_with_type_query_result(self, db, sample_session):
         qr_data = json.dumps({

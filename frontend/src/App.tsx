@@ -1,10 +1,10 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useMemo } from "react";
 import { createPortal } from "react-dom";
-import { ArrowUp, TableProperties, BarChart3, FileText, Loader2, Upload, SquarePen, X, MessageCircle, Square, Copy, Check, Download, Sparkles, Shield, Filter, FlaskConical, LogOut } from "lucide-react";
+import { ArrowUp, TableProperties, BarChart3, FileText, Loader2, Upload, SquarePen, X, MessageCircle, Square, Copy, Check, Download, Sparkles, Shield, Filter, FlaskConical, LogOut, ZoomIn, Grid3X3, Code } from "lucide-react";
 import { AuthPage } from "./components/AuthPage";
 import { DataTab } from "./components/DataTab";
 import { MarkdownLatex } from "./components/MarkdownLatex";
-import { VegaChart } from "./components/VegaChart";
+import { PlotlyChart } from "./components/PlotlyChart";
 import { TableBlock } from "./components/TableBlock";
 
 interface FileInfo {
@@ -28,7 +28,7 @@ interface Message {
   type?: string;
   fileName?: string;
   plotTitle?: string;
-  vegaLiteSpec?: Record<string, unknown>;
+  plotlySpec?: { data: unknown[]; layout?: Record<string, unknown> };
   // table fields
   tableTitle?: string;
   tableHeaders?: string[];
@@ -95,7 +95,7 @@ function mapRestoreMessage(msg: any): Message {
     text: msg.text,
     type: msg.type || undefined,
     plotTitle: msg.plot_title,
-    vegaLiteSpec: msg.plot_data?.vega_lite_spec,
+    plotlySpec: msg.plot_data?.plotly_spec,
   };
   if (msg.type === "table" && msg.plot_data) {
     base.tableTitle = msg.text;
@@ -104,6 +104,137 @@ function mapRestoreMessage(msg: any): Message {
   }
   return base;
 }
+
+const PLOT_COLOR_PRESETS = [
+  { name: "Purple", value: "#9333ea" },
+  { name: "Violet", value: "#7c3aed" },
+  { name: "Pink", value: "#ec4899" },
+  { name: "Blue", value: "#3b82f6" },
+  { name: "Teal", value: "#14b8a6" },
+  { name: "Amber", value: "#f59e0b" },
+];
+
+const PLOT_BG_PRESETS = [
+  { name: "Default", value: "#1e1b2e" },
+  { name: "Dark", value: "#0f0d1a" },
+  { name: "Charcoal", value: "#1a1a2e" },
+  { name: "White", value: "#ffffff" },
+  { name: "Light", value: "#f4f4f5" },
+];
+
+function extractAxisTitle(axis: unknown): string {
+  if (!axis || typeof axis !== "object") return "";
+  const a = axis as Record<string, unknown>;
+  if (typeof a.title === "string") return a.title;
+  if (a.title && typeof a.title === "object") {
+    const t = a.title as Record<string, unknown>;
+    if (typeof t.text === "string") return t.text;
+  }
+  return "";
+}
+
+function lightenColor(hex: string, amount: number): string {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgb(${Math.min(255, Math.round(r + (255 - r) * amount))},${Math.min(255, Math.round(g + (255 - g) * amount))},${Math.min(255, Math.round(b + (255 - b) * amount))})`;
+}
+
+function darkenColor(hex: string, amount: number): string {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgb(${Math.round(r * (1 - amount))},${Math.round(g * (1 - amount))},${Math.round(b * (1 - amount))})`;
+}
+
+function isLightColor(hex: string): boolean {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return (r * 299 + g * 587 + b * 114) / 1000 > 150;
+}
+
+function applyPlotCustomizations(
+  spec: { data: unknown[]; layout?: Record<string, unknown> },
+  custom: { color: string | null; showGrid: boolean; xLabel: string; yLabel: string; bgColor: string | null },
+): { data: unknown[]; layout?: Record<string, unknown> } {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const data = spec.data.map((trace: any) => {
+    if (!custom.color) return trace;
+    const t = { ...trace };
+    if (t.type === "pie") {
+      const count = ((t.values || t.labels || []) as unknown[]).length;
+      const shades = Array.from({ length: count }, (_, j) => lightenColor(custom.color!, j * 0.12));
+      t.marker = { ...(t.marker || {}), colors: shades };
+    } else if (t.type === "heatmap") {
+      // Light (low) → dark (high) colorscale from the selected color
+      const c = custom.color!;
+      const veryLight = lightenColor(c, 0.85);
+      const light = lightenColor(c, 0.55);
+      const dark = darkenColor(c, 0.4);
+      const veryDark = darkenColor(c, 0.7);
+      t.colorscale = [
+        [0, veryLight], [0.25, light],
+        [0.5, c], [0.75, dark],
+        [1, veryDark],
+      ];
+    } else {
+      t.marker = { ...(t.marker || {}), color: custom.color };
+      if (t.line) t.line = { ...t.line, color: custom.color };
+    }
+    return t;
+  });
+
+  const layout = { ...(spec.layout || {}) };
+  const xaxis = { ...((layout.xaxis as Record<string, unknown>) || {}) };
+  const yaxis = { ...((layout.yaxis as Record<string, unknown>) || {}) };
+  xaxis.showgrid = custom.showGrid;
+  yaxis.showgrid = custom.showGrid;
+  xaxis.title = custom.xLabel;
+  yaxis.title = custom.yLabel;
+
+  // Background color
+  if (custom.bgColor) {
+    layout.paper_bgcolor = custom.bgColor;
+    layout.plot_bgcolor = custom.bgColor;
+    // Auto-adjust text colors for light backgrounds
+    const light = isLightColor(custom.bgColor);
+    const textColor = light ? "#27272a" : "#a1a1aa";
+    const titleColor = light ? "#18181b" : "#e4e4e7";
+    const gridColor = light ? "rgba(0,0,0,0.08)" : "rgba(147,51,234,0.1)";
+    layout.font = { color: textColor, size: 11 };
+    layout.title = { ...(layout.title as Record<string, unknown> || {}), font: { color: titleColor, size: 14 } };
+    xaxis.tickfont = { color: textColor, size: 10 };
+    yaxis.tickfont = { color: textColor, size: 10 };
+    xaxis.gridcolor = gridColor;
+    yaxis.gridcolor = gridColor;
+    xaxis.linecolor = gridColor;
+    yaxis.linecolor = gridColor;
+  }
+
+  layout.xaxis = xaxis;
+  layout.yaxis = yaxis;
+
+  return { data, layout };
+}
+
+interface PlotCustom {
+  color: string | null;
+  showGrid: boolean;
+  xLabel: string;
+  yLabel: string;
+  bgColor: string | null;
+  zoomEnabled: boolean;
+}
+
+const DEFAULT_PLOT_CUSTOM: PlotCustom = {
+  color: null,
+  showGrid: true,
+  xLabel: "",
+  yLabel: "",
+  bgColor: null,
+  zoomEnabled: false,
+};
 
 function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
   // Fetch wrapper that auto-logs out on 401 (expired/invalid token)
@@ -126,7 +257,7 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [fileInfo, setFileInfo] = useState<FileInfo | null>(null);
   const [isDragging, setIsDragging] = useState(false);
-  const [fullscreenPlot, setFullscreenPlot] = useState<{ title: string; vegaLiteSpec: Record<string, unknown>; plotId: number } | null>(null);
+  const [fullscreenPlot, setFullscreenPlot] = useState<{ title: string; plotlySpec: { data: unknown[]; layout?: Record<string, unknown> }; plotId: number } | null>(null);
 
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [sessionTitle, setSessionTitle] = useState<string | null>(null);
@@ -136,12 +267,29 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
   const [mobileView, setMobileView] = useState<"chat" | "data" | "history">("chat");
   const [isMobile, setIsMobile] = useState(false);
   const [copiedId, setCopiedId] = useState<number | null>(null);
+  const [copiedCodeId, setCopiedCodeId] = useState<number | null>(null);
   const [loadingSessionId, setLoadingSessionId] = useState<string | null>(null);
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
   const [isSavingPlot, setIsSavingPlot] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(340);
   const [featurePopup, setFeaturePopup] = useState<number | null>(null);
+  // Per-plot customizations, persisted to localStorage
+  const [plotCustomizations, setPlotCustomizations] = useState<Record<number, PlotCustom>>(() => {
+    try {
+      const saved = localStorage.getItem("plot_customizations");
+      return saved ? JSON.parse(saved) : {};
+    } catch { return {}; }
+  });
+  const activePlotCustom = fullscreenPlot ? (plotCustomizations[fullscreenPlot.plotId] || DEFAULT_PLOT_CUSTOM) : DEFAULT_PLOT_CUSTOM;
+  const updatePlotCustom = (patch: Partial<PlotCustom>) => {
+    if (!fullscreenPlot) return;
+    setPlotCustomizations((prev) => {
+      const updated = { ...prev, [fullscreenPlot.plotId]: { ...(prev[fullscreenPlot.plotId] || DEFAULT_PLOT_CUSTOM), ...patch } };
+      localStorage.setItem("plot_customizations", JSON.stringify(updated));
+      return updated;
+    });
+  };
   const fileInputRef = useRef<HTMLInputElement>(null);
   const plotExportRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -243,6 +391,29 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [showFullData]);
+
+  // Initialize axis labels from spec if no saved customization exists
+  useEffect(() => {
+    if (fullscreenPlot && !plotCustomizations[fullscreenPlot.plotId]) {
+      const ly = (fullscreenPlot.plotlySpec.layout || {}) as Record<string, unknown>;
+      updatePlotCustom({
+        xLabel: extractAxisTitle(ly.xaxis),
+        yLabel: extractAxisTitle(ly.yaxis),
+      });
+    }
+  }, [fullscreenPlot?.plotId]);
+
+  // Memoize customized spec for fullscreen plot
+  const customizedFullscreenSpec = useMemo(() => {
+    if (!fullscreenPlot) return null;
+    return applyPlotCustomizations(fullscreenPlot.plotlySpec, {
+      color: activePlotCustom.color,
+      showGrid: activePlotCustom.showGrid,
+      xLabel: activePlotCustom.xLabel,
+      yLabel: activePlotCustom.yLabel,
+      bgColor: activePlotCustom.bgColor,
+    });
+  }, [fullscreenPlot, activePlotCustom]);
 
   // Restore session from backend on mount (no session creation — that happens on upload)
   useEffect(() => {
@@ -373,7 +544,7 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
             role: "system",
             text: data.title as string,
             plotTitle: data.title as string,
-            vegaLiteSpec: data.vega_lite_spec as Record<string, unknown> | undefined,
+            plotlySpec: data.plotly_spec as { data: unknown[]; layout?: Record<string, unknown> } | undefined,
           },
         ]);
         break;
@@ -672,6 +843,17 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
       await navigator.clipboard.writeText(text);
       setCopiedId(msgId);
       setTimeout(() => setCopiedId(null), 2000);
+    } catch {
+      // Fallback
+    }
+  };
+
+  const handleCopyPlotCode = async (plotId: number, spec: { data: unknown[]; layout?: Record<string, unknown> }) => {
+    try {
+      const code = JSON.stringify(spec, null, 2);
+      await navigator.clipboard.writeText(code);
+      setCopiedCodeId(plotId);
+      setTimeout(() => setCopiedCodeId(null), 2000);
     } catch {
       // Fallback
     }
@@ -1335,7 +1517,7 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
                     }`}
                   >
                     <div
-                      className={`rounded-2xl px-4 py-2.5 ${msg.vegaLiteSpec ? 'w-full' : 'max-w-[80%]'}`}
+                      className={`rounded-2xl px-4 py-2.5 ${msg.plotlySpec ? 'w-full' : 'max-w-[80%]'}`}
                       style={{
                         backgroundColor: msg.role === "user" ? '#9333ea' : msg.role === "system" ? 'rgba(147,51,234,0.15)' : '#1a1625',
                         color: msg.role === "user" ? '#fff' : '#e4e4e7',
@@ -1393,19 +1575,30 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
                         </div>
                       )}
                       {/* Inline chart */}
-                      {msg.vegaLiteSpec && (
+                      {msg.plotlySpec && (() => {
+                        const savedCustom = plotCustomizations[msg.id];
+                        const inlineSpec = savedCustom
+                          ? applyPlotCustomizations(msg.plotlySpec!, {
+                              color: savedCustom.color,
+                              showGrid: savedCustom.showGrid,
+                              xLabel: savedCustom.xLabel,
+                              yLabel: savedCustom.yLabel,
+                              bgColor: savedCustom.bgColor,
+                            })
+                          : msg.plotlySpec!;
+                        return (
                         <div className="mt-6">
                           <div
                             className="rounded-lg overflow-hidden cursor-pointer"
                             data-chart-id={msg.id}
-                            style={{ width: '100%', height: 280, backgroundColor: '#161328', border: '1px solid rgba(147,51,234,0.12)' }}
+                            style={{ width: '100%', height: 280, backgroundColor: savedCustom?.bgColor || '#161328', border: '1px solid rgba(147,51,234,0.12)', transition: 'background-color 0.2s' }}
                             onClick={() => setFullscreenPlot({
                               title: msg.plotTitle || "Plot",
-                              vegaLiteSpec: msg.vegaLiteSpec!,
+                              plotlySpec: msg.plotlySpec!,
                               plotId: msg.id,
                             })}
                           >
-                            <VegaChart spec={msg.vegaLiteSpec} />
+                            <PlotlyChart spec={inlineSpec} />
                           </div>
                           <div className="flex gap-[5px] mt-5 opacity-0 group-hover:opacity-100 transition-opacity">
                             <button
@@ -1432,7 +1625,7 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
                                 e.stopPropagation();
                                 setFullscreenPlot({
                                   title: msg.plotTitle || "Plot",
-                                  vegaLiteSpec: msg.vegaLiteSpec!,
+                                  plotlySpec: msg.plotlySpec!,
                                   plotId: msg.id,
                                 });
                               }}
@@ -1447,9 +1640,26 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
                             >
                               <BarChart3 className="w-3 h-3" /> Fullscreen
                             </button>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleCopyPlotCode(msg.id, msg.plotlySpec!);
+                              }}
+                              style={{
+                                display: "flex", alignItems: "center", gap: 4, padding: "2px 8px",
+                                borderRadius: 6, backgroundColor: "transparent",
+                                border: "1px solid rgba(147,51,234,0.15)", color: copiedCodeId === msg.id ? "#22c55e" : "#a1a1aa",
+                                fontSize: 11, cursor: "pointer",
+                              }}
+                              onMouseEnter={(e) => e.currentTarget.style.backgroundColor = "rgba(147,51,234,0.1)"}
+                              onMouseLeave={(e) => e.currentTarget.style.backgroundColor = "transparent"}
+                            >
+                              {copiedCodeId === msg.id ? <><Check className="w-3 h-3" /> Copied</> : <><Code className="w-3 h-3" /> Code</>}
+                            </button>
                           </div>
                         </div>
-                      )}
+                        );
+                      })()}
                     </div>
                   </div>
                 ))}
@@ -1544,7 +1754,7 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
                     style={{ fontWeight: 510, color: '#e4e4e7' }}
                   />
                   <button
-                    onClick={isLoading ? handleStop : handleSend}
+                    onClick={isLoading ? handleStop : () => handleSend()}
                     disabled={!isLoading && !hasContent}
                     className={`w-[36px] h-[36px] rounded-full flex items-center justify-center relative overflow-hidden shrink-0 transition-all duration-200 ${
                       isLoading || hasContent ? "cursor-pointer" : "cursor-default"
@@ -1795,10 +2005,10 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
           <div
             style={{
               position: 'relative',
-              width: isMobile ? 'calc(100vw - 24px)' : '80vw',
-              height: isMobile ? 'auto' : '75vh',
-              maxWidth: isMobile ? undefined : 900,
-              maxHeight: isMobile ? '85vh' : 700,
+              width: isMobile ? 'calc(100vw - 24px)' : '85vw',
+              height: isMobile ? 'auto' : '80vh',
+              maxWidth: isMobile ? undefined : 1100,
+              maxHeight: isMobile ? '85vh' : 750,
               backgroundColor: '#1e1b2e',
               borderRadius: isMobile ? 16 : 16,
               border: '1px solid rgba(147,51,234,0.25)',
@@ -1814,67 +2024,220 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'space-between',
-              padding: '12px 20px',
+              padding: '10px 16px',
               borderBottom: '1px solid rgba(147,51,234,0.15)',
               backgroundColor: '#161328',
               flexShrink: 0,
             }}>
-              <span style={{ fontSize: 15, fontWeight: 590, color: '#e4e4e7', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+              <span style={{ fontSize: 14, fontWeight: 590, color: '#e4e4e7', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
                 {fullscreenPlot.title}
               </span>
-              <div style={{ display: 'flex', gap: 8, flexShrink: 0, marginLeft: 12 }}>
+              <div style={{ display: 'flex', gap: 6, flexShrink: 0, marginLeft: 12, alignItems: 'center' }}>
                 <button
                   onClick={handleSavePlotPng}
                   disabled={isSavingPlot}
+                  title="Download as PNG"
                   style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 6,
-                    padding: '6px 14px',
-                    borderRadius: 8,
-                    backgroundColor: 'rgba(147,51,234,0.15)',
-                    color: '#e4e4e7',
-                    fontSize: 13,
-                    fontWeight: 510,
-                    border: '1px solid rgba(147,51,234,0.3)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    width: 32, height: 32, borderRadius: 8,
+                    backgroundColor: 'rgba(147,51,234,0.12)', color: '#a1a1aa',
+                    border: '1px solid rgba(147,51,234,0.2)',
                     cursor: isSavingPlot ? 'not-allowed' : 'pointer',
-                    opacity: isSavingPlot ? 0.7 : 1,
-                    transition: 'background-color 0.15s, border-color 0.15s',
+                    opacity: isSavingPlot ? 0.5 : 1, transition: 'background-color 0.15s, color 0.15s',
                   }}
-                  onMouseEnter={(e) => { if (!isSavingPlot) { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.25)'; e.currentTarget.style.borderColor = 'rgba(147,51,234,0.5)'; } }}
-                  onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.15)'; e.currentTarget.style.borderColor = 'rgba(147,51,234,0.3)'; }}
+                  onMouseEnter={(e) => { if (!isSavingPlot) { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.25)'; e.currentTarget.style.color = '#e4e4e7'; } }}
+                  onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.12)'; e.currentTarget.style.color = '#a1a1aa'; }}
                 >
-                  {isSavingPlot ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
-                  {isSavingPlot ? 'Saving...' : 'Save PNG'}
+                  {isSavingPlot ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+                </button>
+                <button
+                  onClick={() => handleCopyPlotCode(fullscreenPlot.plotId, fullscreenPlot.plotlySpec)}
+                  title="Copy Plotly JSON spec"
+                  style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    width: 32, height: 32, borderRadius: 8,
+                    backgroundColor: copiedCodeId === fullscreenPlot.plotId ? 'rgba(34,197,94,0.15)' : 'rgba(147,51,234,0.12)',
+                    color: copiedCodeId === fullscreenPlot.plotId ? '#22c55e' : '#a1a1aa',
+                    border: copiedCodeId === fullscreenPlot.plotId ? '1px solid rgba(34,197,94,0.3)' : '1px solid rgba(147,51,234,0.2)',
+                    cursor: 'pointer', transition: 'background-color 0.15s, color 0.15s',
+                  }}
+                  onMouseEnter={(e) => { if (copiedCodeId !== fullscreenPlot.plotId) { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.25)'; e.currentTarget.style.color = '#e4e4e7'; } }}
+                  onMouseLeave={(e) => { if (copiedCodeId !== fullscreenPlot.plotId) { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.12)'; e.currentTarget.style.color = '#a1a1aa'; } }}
+                >
+                  {copiedCodeId === fullscreenPlot.plotId ? <Check className="w-4 h-4" /> : <Code className="w-4 h-4" />}
                 </button>
                 <button
                   onClick={() => setFullscreenPlot(null)}
+                  title="Close"
                   style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 6,
-                    padding: '6px 14px',
-                    borderRadius: 8,
-                    backgroundColor: '#9333ea',
-                    color: '#fff',
-                    fontSize: 13,
-                    fontWeight: 600,
-                    border: '1px solid rgba(255,255,255,0.2)',
-                    cursor: 'pointer',
-                    boxShadow: '0 2px 8px rgba(147,51,234,0.4)',
-                    transition: 'filter 0.15s, transform 0.15s',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    width: 32, height: 32, borderRadius: 8,
+                    backgroundColor: 'rgba(147,51,234,0.12)', color: '#a1a1aa',
+                    border: '1px solid rgba(147,51,234,0.2)', cursor: 'pointer',
+                    transition: 'background-color 0.15s, color 0.15s',
                   }}
-                  onMouseEnter={(e) => { e.currentTarget.style.filter = 'brightness(1.15)'; e.currentTarget.style.transform = 'scale(1.04)'; }}
-                  onMouseLeave={(e) => { e.currentTarget.style.filter = ''; e.currentTarget.style.transform = ''; }}
+                  onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'rgba(248,113,113,0.15)'; e.currentTarget.style.color = '#f87171'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.12)'; e.currentTarget.style.color = '#a1a1aa'; }}
                 >
-                  <span style={{ fontSize: 18, lineHeight: 1 }}>&times;</span>
-                  Close
+                  <X className="w-4 h-4" />
                 </button>
               </div>
             </div>
-            {/* Chart */}
-            <div ref={plotExportRef} style={{ flex: isMobile ? undefined : 1, minHeight: isMobile ? 300 : 0, height: isMobile ? '60vw' : undefined, maxHeight: isMobile ? '65vh' : undefined, padding: 16 }}>
-              <VegaChart spec={fullscreenPlot.vegaLiteSpec} actions />
+            {/* Body: chart + sidebar */}
+            <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden' }}>
+              {/* Chart area */}
+              <div ref={plotExportRef} style={{ flex: 1, minWidth: 0, padding: 16, backgroundColor: activePlotCustom.bgColor || 'transparent', transition: 'background-color 0.2s' }}>
+                {customizedFullscreenSpec && <PlotlyChart spec={customizedFullscreenSpec} interactive={activePlotCustom.zoomEnabled} />}
+              </div>
+              {/* Customization sidebar */}
+              <div style={{
+                width: isMobile ? '100%' : 200,
+                flexShrink: 0,
+                borderLeft: '1px solid rgba(147,51,234,0.12)',
+                backgroundColor: '#161328',
+                overflowY: 'auto',
+                display: 'flex',
+                flexDirection: 'column',
+              }}>
+                {/* Colors category */}
+                <div style={{ padding: '12px 14px 10px', borderBottom: '1px solid rgba(147,51,234,0.08)' }}>
+                  <span style={{ fontSize: 10, fontWeight: 650, color: '#71717a', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Trace Color</span>
+                  <div style={{ display: 'flex', gap: 5, marginTop: 8, flexWrap: 'wrap' }}>
+                    {PLOT_COLOR_PRESETS.map((c) => (
+                      <button
+                        key={c.value}
+                        onClick={() => updatePlotCustom({ color: activePlotCustom.color === c.value ? null : c.value })}
+                        style={{
+                          width: 22, height: 22, borderRadius: 99, backgroundColor: c.value,
+                          border: activePlotCustom.color === c.value ? '2.5px solid #fff' : '2px solid transparent',
+                          outline: activePlotCustom.color === c.value ? '1px solid rgba(147,51,234,0.5)' : 'none',
+                          cursor: 'pointer', transition: 'border-color 0.15s, transform 0.15s',
+                        }}
+                        title={c.name}
+                        onMouseEnter={(e) => e.currentTarget.style.transform = 'scale(1.15)'}
+                        onMouseLeave={(e) => e.currentTarget.style.transform = ''}
+                      />
+                    ))}
+                  </div>
+                </div>
+                {/* Background category */}
+                <div style={{ padding: '12px 14px 10px', borderBottom: '1px solid rgba(147,51,234,0.08)' }}>
+                  <span style={{ fontSize: 10, fontWeight: 650, color: '#71717a', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Background</span>
+                  <div style={{ display: 'flex', gap: 5, marginTop: 8, flexWrap: 'wrap' }}>
+                    {PLOT_BG_PRESETS.map((c) => (
+                      <button
+                        key={c.value}
+                        onClick={() => updatePlotCustom({ bgColor: activePlotCustom.bgColor === c.value ? null : c.value })}
+                        style={{
+                          width: 22, height: 22, borderRadius: 6, backgroundColor: c.value,
+                          border: activePlotCustom.bgColor === c.value ? '2.5px solid #9333ea' : '1px solid rgba(255,255,255,0.12)',
+                          cursor: 'pointer', transition: 'border-color 0.15s, transform 0.15s',
+                        }}
+                        title={c.name}
+                        onMouseEnter={(e) => e.currentTarget.style.transform = 'scale(1.15)'}
+                        onMouseLeave={(e) => e.currentTarget.style.transform = ''}
+                      />
+                    ))}
+                  </div>
+                </div>
+                {/* View category */}
+                <div style={{ padding: '12px 14px 10px', borderBottom: '1px solid rgba(147,51,234,0.08)' }}>
+                  <span style={{ fontSize: 10, fontWeight: 650, color: '#71717a', textTransform: 'uppercase', letterSpacing: '0.06em' }}>View</span>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 }}>
+                    <button
+                      onClick={() => updatePlotCustom({ showGrid: !activePlotCustom.showGrid })}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 6, padding: '5px 10px',
+                        borderRadius: 7, width: '100%',
+                        backgroundColor: activePlotCustom.showGrid ? 'rgba(147,51,234,0.15)' : 'rgba(255,255,255,0.03)',
+                        border: activePlotCustom.showGrid ? '1px solid rgba(147,51,234,0.35)' : '1px solid rgba(255,255,255,0.06)',
+                        color: activePlotCustom.showGrid ? '#c084fc' : '#52525b',
+                        fontSize: 12, fontWeight: 500, cursor: 'pointer', transition: 'all 0.15s',
+                      }}
+                    >
+                      <Grid3X3 className="w-3.5 h-3.5" /> Grid lines
+                    </button>
+                    <button
+                      onClick={() => updatePlotCustom({ zoomEnabled: !activePlotCustom.zoomEnabled })}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 6, padding: '5px 10px',
+                        borderRadius: 7, width: '100%',
+                        backgroundColor: activePlotCustom.zoomEnabled ? 'rgba(147,51,234,0.15)' : 'rgba(255,255,255,0.03)',
+                        border: activePlotCustom.zoomEnabled ? '1px solid rgba(147,51,234,0.35)' : '1px solid rgba(255,255,255,0.06)',
+                        color: activePlotCustom.zoomEnabled ? '#c084fc' : '#52525b',
+                        fontSize: 12, fontWeight: 500, cursor: 'pointer', transition: 'all 0.15s',
+                      }}
+                    >
+                      <ZoomIn className="w-3.5 h-3.5" /> Zoom & Pan
+                    </button>
+                  </div>
+                </div>
+                {/* Labels category */}
+                <div style={{ padding: '12px 14px 10px', borderBottom: '1px solid rgba(147,51,234,0.08)' }}>
+                  <span style={{ fontSize: 10, fontWeight: 650, color: '#71717a', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Axis Labels</span>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 }}>
+                    <div>
+                      <label style={{ fontSize: 10, color: '#52525b', marginBottom: 3, display: 'block' }}>X Axis</label>
+                      <input
+                        type="text"
+                        value={activePlotCustom.xLabel}
+                        onChange={(e) => updatePlotCustom({ xLabel: e.target.value })}
+                        placeholder="X axis label"
+                        style={{
+                          width: '100%', padding: '4px 8px', borderRadius: 6,
+                          backgroundColor: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)',
+                          color: '#e4e4e7', fontSize: 12, outline: 'none', transition: 'border-color 0.15s',
+                          boxSizing: 'border-box',
+                        }}
+                        onFocus={(e) => e.currentTarget.style.borderColor = 'rgba(147,51,234,0.4)'}
+                        onBlur={(e) => e.currentTarget.style.borderColor = 'rgba(255,255,255,0.08)'}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: 10, color: '#52525b', marginBottom: 3, display: 'block' }}>Y Axis</label>
+                      <input
+                        type="text"
+                        value={activePlotCustom.yLabel}
+                        onChange={(e) => updatePlotCustom({ yLabel: e.target.value })}
+                        placeholder="Y axis label"
+                        style={{
+                          width: '100%', padding: '4px 8px', borderRadius: 6,
+                          backgroundColor: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)',
+                          color: '#e4e4e7', fontSize: 12, outline: 'none', transition: 'border-color 0.15s',
+                          boxSizing: 'border-box',
+                        }}
+                        onFocus={(e) => e.currentTarget.style.borderColor = 'rgba(147,51,234,0.4)'}
+                        onBlur={(e) => e.currentTarget.style.borderColor = 'rgba(255,255,255,0.08)'}
+                      />
+                    </div>
+                  </div>
+                </div>
+                {/* Reset */}
+                <div style={{ padding: '12px 14px', marginTop: 'auto' }}>
+                  <button
+                    onClick={() => {
+                      if (!fullscreenPlot) return;
+                      const ly = (fullscreenPlot.plotlySpec.layout || {}) as Record<string, unknown>;
+                      updatePlotCustom({
+                        ...DEFAULT_PLOT_CUSTOM,
+                        xLabel: extractAxisTitle(ly.xaxis),
+                        yLabel: extractAxisTitle(ly.yaxis),
+                      });
+                    }}
+                    title="Reset all customizations"
+                    style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+                      padding: '6px 12px', borderRadius: 7, width: '100%',
+                      backgroundColor: 'rgba(248,113,113,0.06)', border: '1px solid rgba(248,113,113,0.18)',
+                      color: '#f87171', fontSize: 12, fontWeight: 510, cursor: 'pointer', transition: 'all 0.15s',
+                    }}
+                    onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'rgba(248,113,113,0.12)'; e.currentTarget.style.borderColor = 'rgba(248,113,113,0.35)'; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'rgba(248,113,113,0.06)'; e.currentTarget.style.borderColor = 'rgba(248,113,113,0.18)'; }}
+                  >
+                    <X className="w-3.5 h-3.5" /> Reset All
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         </div>,

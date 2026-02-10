@@ -48,11 +48,10 @@
             "sonner": "^2.0.3",
             "tailwind-merge": "*",
             "vaul": "^1.1.2",
-            "vega": "^6.2.0",
-            "vega-embed": "^7.1.0",
-            "vega-lite": "^6.4.2"
+            "plotly.js-dist-min": "^2.35.0"
       },
       "devDependencies": {
+            "@types/plotly.js": "^2.33.0",
             "@types/node": "^20.10.0",
             "@vitejs/plugin-react-swc": "^3.10.2",
             "vite": "6.3.5"
