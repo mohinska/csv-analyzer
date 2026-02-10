@@ -1,0 +1,17 @@
+node_modules
+frontend/node_modules
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.venv
+venv
+.git
+.vscode
+.idea
+*.swp
+*.swo
+.DS_Store
+*.log
+data_analyzer.db
+data/

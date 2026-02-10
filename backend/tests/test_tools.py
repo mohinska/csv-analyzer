@@ -153,54 +153,46 @@ class TestCreatePlot:
     @pytest.mark.asyncio
     async def test_sends_plot_event(self, mock_send_event, collected_events):
         spec = {
-            "mark": "bar",
-            "data": {"values": [{"x": "A", "y": 1}]},
-            "encoding": {
-                "x": {"field": "x", "type": "nominal"},
-                "y": {"field": "y", "type": "quantitative"},
-            },
+            "data": [{"type": "bar", "x": ["A"], "y": [1]}],
+            "layout": {"xaxis": {"title": "Category"}, "yaxis": {"title": "Value"}},
         }
         await execute_create_plot(
             title="My Chart",
-            vega_lite_spec=spec,
+            plotly_spec=spec,
             send_event=mock_send_event,
         )
         assert len(collected_events) == 1
         evt = collected_events[0]
         assert evt["event"] == "plot"
         assert evt["data"]["title"] == "My Chart"
-        assert evt["data"]["vega_lite_spec"]["mark"] == "bar"
-
+        assert evt["data"]["plotly_spec"]["data"][0]["type"] == "bar"
     @pytest.mark.asyncio
     async def test_truncates_data_over_100_rows(self, mock_send_event, collected_events):
-        big_data = [{"x": i, "y": i * 2} for i in range(200)]
+        big_x = list(range(200))
+        big_y = [i * 2 for i in range(200)]
         spec = {
-            "mark": "point",
-            "data": {"values": big_data},
-            "encoding": {
-                "x": {"field": "x", "type": "quantitative"},
-                "y": {"field": "y", "type": "quantitative"},
-            },
+            "data": [{"type": "scatter", "mode": "markers", "x": big_x, "y": big_y}],
         }
         await execute_create_plot(
             title="Big Plot",
-            vega_lite_spec=spec,
+            plotly_spec=spec,
             send_event=mock_send_event,
         )
-        sent_spec = collected_events[0]["data"]["vega_lite_spec"]
-        assert len(sent_spec["data"]["values"]) <= 100
+        sent_spec = collected_events[0]["data"]["plotly_spec"]
+        assert len(sent_spec["data"][0]["x"]) <= 100
+        assert len(sent_spec["data"][0]["y"]) <= 100
 
     @pytest.mark.asyncio
     async def test_saves_message_to_db(self, db, sample_session, mock_send_event):
         from backend.app.agent.persistence import save_tool_message
 
-        spec = {"mark": "bar", "data": {"values": []}, "encoding": {}}
+        spec = {"data": [{"type": "bar", "x": [], "y": []}], "layout": {}}
         save_tool_message(
             db=db,
             session_id=sample_session.id,
             tool_name="create_plot",
             text="My Chart",
-            plot_data=json.dumps({"title": "My Chart", "vega_lite_spec": spec}),
+            plot_data=json.dumps({"title": "My Chart", "plotly_spec": spec}),
         )
         from backend.app.models.message import Message
         msg = db.query(Message).filter(Message.session_id == sample_session.id).first()

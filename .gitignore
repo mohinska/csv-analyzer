@@ -12,6 +12,7 @@ env/
 
 # Data files
 data/
+*.db
 
 # Node
 node_modules/

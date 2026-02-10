@@ -136,20 +136,20 @@ async def execute_output_table(
 
 async def execute_create_plot(
     title: str,
-    vega_lite_spec: dict,
+    plotly_spec: dict,
     send_event: SendEvent,
 ) -> dict[str, Any]:
-    """Send a Vega-Lite plot to the user. Truncates data to MAX_PLOT_ROWS."""
+    """Send a Plotly.js plot to the user. Truncates trace data to MAX_PLOT_ROWS."""
     logger.debug("execute_create_plot: title=%s", title)
-    # Enforce row limit on inline data
-    if "data" in vega_lite_spec and "values" in vega_lite_spec["data"]:
-        values = vega_lite_spec["data"]["values"]
-        if len(values) > MAX_PLOT_ROWS:
-            vega_lite_spec["data"]["values"] = values[:MAX_PLOT_ROWS]
+    # Enforce row limit on each trace's data arrays
+    for trace in plotly_spec.get("data", []):
+        for key in ("x", "y", "z", "values", "labels", "text", "customdata"):
+            if key in trace and isinstance(trace[key], list) and len(trace[key]) > MAX_PLOT_ROWS:
+                trace[key] = trace[key][:MAX_PLOT_ROWS]
 
     await send_event("plot", {
         "title": title,
-        "vega_lite_spec": vega_lite_spec,
+        "plotly_spec": plotly_spec,
     })
     return {"ok": True}
 
