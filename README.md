@@ -1,29 +1,19 @@
-# Agent Forge — AI Data Analyzer
+# Data Analyzer
 
-An AI-powered data analysis assistant that lets you upload CSV/Parquet files and explore them through natural language conversation. Ask questions, get statistics, generate visualizations — all through chat.
-
-Built with a **FastAPI** backend using **Claude (Anthropic)** as the reasoning engine and a **React + TypeScript** frontend with real-time streaming.
-
----
+AI-powered data analysis through natural language. Upload a CSV or Parquet file, ask questions in plain English, get tables, statistics, and visualizations — all in a chat interface.
 
 ## Features
 
-- **Natural language data analysis** — ask questions in plain English (or Ukrainian), get instant answers with tables, statistics, and insights
-- **Interactive visualizations** — bar, line, scatter, histogram, pie, box, heatmap, and area charts rendered with Recharts, with multi-series (grouped) support
-- **File support** — CSV and Parquet uploads with automatic type detection
-- **Agentic architecture** — Planner agent autonomously decides what queries to run, what charts to create, and how to present findings
-- **Streaming responses** — Server-Sent Events for real-time message delivery with live status updates
-- **Data transformations** — clean data, add columns, filter rows — changes persist in session
-- **Chart customization** — change colors, backgrounds; export any chart as PNG or copy the Python code behind it
-- **Data export** — export current (transformed) or original data as CSV
-- **DuckDB SQL engine** — fast analytical queries with full SQL support (window functions, CTEs, statistical aggregates)
-- **LLM Judge** — per-message quality evaluation for relevance, accuracy, and completeness
-- **Session management** — each upload creates an isolated session with its own data and conversation history
-- **Smart suggestions** — after upload, get AI-generated prompt suggestions based on your data
-- **LaTeX math rendering** — statistical formulas and equations rendered with KaTeX
-- **Markdown tables** — query results displayed as formatted, scrollable tables
-
----
+- **Natural language queries** — ask questions about your data, get answers with statistics, tables, and insights
+- **Vega-Lite visualizations** — bar, line, scatter, histogram, pie, box, heatmap, and area charts
+- **CSV & Parquet support** — automatic type detection, column profiling, up to 1 GB files
+- **Agentic architecture** — Claude autonomously decides what SQL to run, what charts to create, and how to present results
+- **Real-time streaming** — WebSocket connection delivers agent responses as they're generated
+- **Auto-analysis** — after upload, the agent automatically profiles your dataset and provides initial insights
+- **Session management** — each upload creates an isolated session with its own data and chat history
+- **User accounts** — JWT-based authentication with per-user session isolation
+- **LaTeX rendering** — statistical formulas rendered with KaTeX
+- **DuckDB engine** — fast analytical SQL with window functions, CTEs, and statistical aggregates
 
 ## Quick Start
 
@@ -31,36 +21,46 @@ Built with a **FastAPI** backend using **Claude (Anthropic)** as the reasoning e
 
 - Python 3.11+
 - Node.js 18+
-- An [Anthropic API key](https://console.anthropic.com/)
+- [Anthropic API key](https://console.anthropic.com/)
 
-### 1. Clone and configure
+### Setup
 
 ```bash
 git clone <repo-url>
-cd csv-analyzer
+cd data-analyzer
 
-# Create .env in the root directory
-echo "ANTHROPIC_API_KEY=your-api-key-here" > .env
+# Configure environment
+cp .env.example .env
+# Edit .env and add your ANTHROPIC_API_KEY
 ```
 
-### 2. Backend
+### Run with Docker (recommended)
 
 ```bash
-# Create virtual environment
+cd docker
+docker compose up --build
+```
+
+App available at **http://localhost:3000**. Backend API at **http://localhost:8001**.
+
+Docker handles database migrations, persistent storage, and nginx reverse proxy automatically.
+
+### Run locally
+
+**Backend:**
+
+```bash
 python3 -m venv venv
-source venv/bin/activate      # Mac/Linux
-# venv\Scripts\activate       # Windows
+source venv/bin/activate
 
-# Install dependencies
 pip install -r backend/requirements.txt
-
-# Run (from root directory, not from backend/)
+alembic -c backend/alembic.ini upgrade head
 python3 -m backend.main
 ```
 
-Backend runs at **http://localhost:8001**
+Backend runs at **http://localhost:8001**.
 
-### 3. Frontend
+**Frontend:**
 
 ```bash
 cd frontend
@@ -68,145 +68,214 @@ npm install
 npm run dev
 ```
 
-Frontend runs at **http://localhost:3000**
-
-Open http://localhost:3000, upload a CSV or Parquet file, and start chatting.
-
----
+Frontend runs at **http://localhost:3000**. Vite proxies `/api` requests to the backend.
 
 ## Architecture
 
 ```
-+---------------------------------------------------------+
-|                   React Frontend (:3000)                 |
-|  App.tsx <- SSE stream <- /api/chat                      |
-|  DataTab  |  PlotsTab  |  Chat panel                     |
-+----------------------------+----------------------------+
-                             | HTTP + SSE (proxied via Vite)
-+----------------------------v----------------------------+
-|                  FastAPI Backend (:8001)                  |
-|                                                          |
-|  routes.py --> PromptPolisher --> Planner Agent (loop)    |
-|                                      |                   |
-|              +----------+------------+--------+          |
-|              v          v            v        v          |
-|        write_to_chat  generate    create    finish        |
-|                       _query      _plot                   |
-|                         |                                |
-|                    QueryMaker (LLM -> DuckDB SQL)        |
-|                         |                                |
-|                  QueryExecutor (DuckDB)                   |
-|                         |                                |
-|                    LLM Judge (quality eval)               |
-|                         |                                |
-|                  SessionManager (disk)                    |
-+----------------------------------------------------------+
+┌─────────────────────────────────────────────────────┐
+│              React Frontend (:3000)                  │
+│  Auth ─► Upload ─► WebSocket Chat                   │
+│  DataTab  │  PlotsTab  │  Chat Panel                │
+└────────────────────┬────────────────────────────────┘
+                     │ REST + WebSocket
+┌────────────────────▼────────────────────────────────┐
+│             FastAPI Backend (:8001)                  │
+│                                                     │
+│  Auth (JWT) ─► Upload ─► Session ─► WebSocket       │
+│                                        │            │
+│                              Agent Loop (Claude)    │
+│                           ┌────┬────┬────┬────┐    │
+│                           ▼    ▼    ▼    ▼    ▼    │
+│                       sql  output output plot final │
+│                       query text   table       ize  │
+│                         │                           │
+│                    DuckDB (read-only SQL)            │
+│                         │                           │
+│                  SQLite (users, sessions, messages)  │
+└─────────────────────────────────────────────────────┘
 ```
 
-### Backend Components
+### How It Works
 
-| Component | File | Description |
-|-----------|------|-------------|
-| **Planner Agent** | `agents/planner.py` | Agentic loop — calls Claude with tools, executes results, prepares chart data, streams events |
-| **Query Maker** | `agents/query_maker.py` | Generates DuckDB SQL from natural language intent |
-| **Prompt Polisher** | `agents/prompt_polisher.py` | Validates and classifies user prompts before the planner |
-| **Query Executor** | `services/query_executor.py` | Executes DuckDB SQL against the session DataFrame |
-| **LLM Judge** | `services/llm_judge.py` | Evaluates response quality (relevance, accuracy, completeness) |
-| **Metrics Evaluator** | `services/metrics_evaluator.py` | Checks query results for quality issues and hallucinations |
-| **Session Manager** | `services/session_manager.py` | Per-session data files, chat history, and plot metadata |
-| **Anthropic LLM** | `llm/anthropic_llm.py` | Claude API wrapper with tool-use support |
-| **Mock LLM** | `llm/mock_llm.py` | Testing without API key — returns canned responses |
-| **API Routes** | `api/routes.py` | All FastAPI endpoints — upload, chat (SSE), preview, plots, etc. |
-| **Config** | `config.py` | Pydantic settings — API key, model, port, CORS |
-
-### Frontend Components
-
-| Component | File | Description |
-|-----------|------|-------------|
-| **App** | `src/App.tsx` | Main app — chat panel, SSE handling, file upload, state management |
-| **DataTab** | `src/components/DataTab.tsx` | Left panel data table with sort, filter, search, version switching, CSV export |
-| **PlotsTab** | `src/components/PlotsTab.tsx` | Plot gallery with view, code copy, and PNG download |
-| **Chart** | `src/components/Chart.tsx` | Recharts wrapper — bar, line, area, scatter, histogram, pie, box, heatmap with multi-series support |
-| **MarkdownLatex** | `src/components/MarkdownLatex.tsx` | Markdown + LaTeX renderer for chat messages |
-
----
+1. **Register/Login** — create an account, receive a JWT token
+2. **Upload** — upload a CSV or Parquet file; creates a session with column profiling
+3. **Auto-analyze** — the agent runs an initial analysis of the dataset
+4. **Chat** — ask questions via WebSocket; the agent enters a tool-use loop (max 15 iterations):
+   - `sql_query` — execute read-only DuckDB SQL against the dataset
+   - `output_text` — send markdown text to the user
+   - `output_table` — send a structured table
+   - `create_plot` — send a Vega-Lite visualization spec
+   - `finalize` — end the turn, optionally set session title
+5. **Stream** — each tool result is streamed to the frontend in real time
 
 ## Tech Stack
 
 **Backend:**
-- Python 3.11+
 - FastAPI + Uvicorn
-- Anthropic Claude API (claude-sonnet-4-5 by default)
-- DuckDB for analytical SQL queries
-- Pandas for data loading and transformations
-- Pydantic v2 for validation
+- Anthropic Claude API (tool-use)
+- DuckDB (analytical SQL engine)
+- SQLAlchemy 2.0 + Alembic (ORM & migrations)
+- SQLite (metadata database)
+- PyJWT + Bcrypt (authentication)
+- Pydantic v2 (validation & settings)
 
 **Frontend:**
 - React 18 + TypeScript
 - Vite 6
-- Recharts for charts
-- Tailwind CSS for styling
-- KaTeX for math rendering
-- Lucide React for icons
-- html2canvas for PNG export
+- Vega-Lite + Vega-Embed (visualizations)
+- Tailwind CSS
+- Radix UI (component primitives)
+- KaTeX (math rendering)
+- Lucide React (icons)
 
----
+## Project Structure
 
-## Configuration
-
-The `.env` file in the project root configures the backend:
-
-```env
-ANTHROPIC_API_KEY=your-api-key-here    # Required
-
-# Optional
-CLASSIFIER_MODEL=claude-sonnet-4-5-20250929   # LLM model for the planner
-JUDGE_MODEL=claude-sonnet-4-5-20250929        # LLM model for quality evaluation
-JUDGE_ENABLED=true                             # Enable/disable LLM Judge
-USE_MOCK_LLM=false                             # Test without API key
-DEBUG=true                                     # Enable debug logging
 ```
-
----
+├── backend/
+│   ├── main.py                  # FastAPI app entry point
+│   ├── app/
+│   │   ├── config.py            # Pydantic settings (.env)
+│   │   ├── database.py          # SQLAlchemy engine & session
+│   │   ├── agent/
+│   │   │   ├── graph.py         # Agent loop (Claude tool-use)
+│   │   │   ├── tools.py         # Tool executors (SQL, text, plot)
+│   │   │   ├── context.py       # System prompts & data summary
+│   │   │   ├── persistence.py   # Message storage
+│   │   │   └── sql_sanitizer.py # SQL validation (blocks DML/DDL)
+│   │   ├── models/              # SQLAlchemy models
+│   │   ├── routers/             # API endpoints
+│   │   ├── schemas/             # Pydantic request/response models
+│   │   ├── services/            # File handling & DuckDB
+│   │   ├── dependencies/        # Auth middleware
+│   │   └── utils/               # JWT & password hashing
+│   ├── alembic/                 # Database migrations
+│   ├── alembic.ini              # Alembic configuration
+│   └── tests/                   # Pytest test suite
+├── frontend/
+│   ├── src/
+│   │   ├── App.tsx              # Main app (auth, chat, WS)
+│   │   └── components/          # UI components
+│   └── package.json
+├── docker/
+│   ├── docker-compose.yml
+│   ├── Dockerfile.backend
+│   ├── Dockerfile.frontend
+│   └── nginx.conf
+└── .env.example
+```
 
 ## API Endpoints
 
+### REST
+
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/session` | Create a new session |
-| `GET` | `/api/session/{session_id}` | Get session status |
-| `POST` | `/api/upload/{session_id}` | Upload CSV/Parquet file |
-| `GET` | `/api/summary/{session_id}` | Get data summary |
-| `GET` | `/api/suggestions/{session_id}` | Get AI prompt suggestions |
-| `GET` | `/api/preview/{session_id}` | Get data preview (paginated) |
-| `POST` | `/api/chat` | Main chat endpoint (SSE streaming) |
-| `POST` | `/api/chat/{session_id}/message` | Add message to history |
-| `GET` | `/api/chat/{session_id}/history` | Get chat history |
-| `GET` | `/api/plots/{session_id}` | Get all generated plots |
-| `POST` | `/api/reset/{session_id}` | Reset data to original |
-| `GET` | `/api/health` | Health check |
+| `POST` | `/api/auth/register` | Create account |
+| `POST` | `/api/auth/login` | Login, receive JWT |
+| `POST` | `/api/upload` | Upload file, create session |
+| `GET` | `/api/sessions` | List user's sessions |
+| `GET` | `/api/sessions/{id}` | Get session detail (file, messages) |
+| `DELETE` | `/api/sessions/{id}` | Delete session and data |
 
----
+### WebSocket
 
-## How It Works
+| Endpoint | Description |
+|----------|-------------|
+| `WS /api/sessions/{id}/ws?token=<jwt>` | Real-time chat |
 
-1. **Upload** — user uploads a CSV or Parquet file, creating a new session
-2. **Auto-analysis** — an initial analysis runs automatically, providing key stats and insights
-3. **Chat** — user types a question in natural language
-4. **Planner Agent** receives the message along with a data summary and available tools
-5. **Tool loop** — the agent decides which tools to call:
-   - `write_to_chat(text)` — sends a message to the user (streamed via SSE)
-   - `generate_query(intent)` — generates and executes DuckDB SQL against the dataset
-   - `create_plot(...)` — prepares chart data (aggregation, pivoting, sorting) sent to the frontend for Recharts rendering
-   - `finish()` — ends the current turn
-6. **Streaming** — all events are streamed to the frontend via SSE as they happen
-7. **Data mutations** — if a query modifies the DataFrame, the updated data is persisted and the frontend refreshes
+**Client messages:**
+- `{"type": "message", "text": "..."}` — send a question
+- `{"type": "auto_analyze"}` — trigger initial analysis
+- `{"type": "stop"}` — cancel running agent
 
----
+**Server events:**
+- `status` — progress indicator
+- `text` — markdown text from agent
+- `table` — structured table data
+- `plot` — Vega-Lite visualization spec
+- `query_result` — SQL query + result rows
+- `session_update` — title changed
+- `error` — error message
+- `done` — turn complete
+
+## Configuration
+
+All settings are read from `.env` in the project root (via Pydantic settings):
+
+```env
+# Required
+ANTHROPIC_API_KEY=your-api-key-here
+
+# Optional
+SECRET_KEY=change-me-in-production    # JWT signing key
+DATABASE_URL=sqlite:///./data_analyzer.db
+DATA_DIR=data                         # Upload storage directory
+MAX_UPLOAD_SIZE=1073741824            # 1 GB
+ACCESS_TOKEN_EXPIRE_DAYS=30
+```
+
+## Docker
+
+The `docker/` directory contains a production-ready Docker Compose setup.
+
+### Services
+
+- **backend** — Python 3.11, runs Alembic migrations on startup, serves API on port 8001
+- **frontend** — Node 20 build stage + nginx, serves static files on port 3000, proxies `/api` to backend
+
+### Volumes
+
+- `app-data` — persists uploaded files across container restarts
+- `db-data` — persists the SQLite database
+
+### Commands
+
+```bash
+# Start
+cd docker
+docker compose up --build
+
+# Start in background
+docker compose up --build -d
+
+# View logs
+docker compose logs -f
+
+# Stop
+docker compose down
+
+# Stop and remove volumes (deletes all data)
+docker compose down -v
+```
+
+## Database
+
+SQLite with SQLAlchemy ORM. Four tables:
+
+- **users** — email, bcrypt password hash
+- **sessions** — per-user, linked to uploaded file
+- **files** — filename, path on disk, row/column counts, column profiles (JSON)
+- **messages** — chat history (role, text, type, optional plot_data JSON)
+
+Migrations managed by Alembic. Run manually with:
+
+```bash
+alembic -c backend/alembic.ini upgrade head
+```
 
 ## Security
 
-- **SQL sanitization** — generated DuckDB queries are validated; DDL/DML statements (DROP, DELETE, INSERT, etc.) are blocked
-- **Plot code sanitization** — generated matplotlib code is stripped of imports, `exec()`, `eval()`, `open()`, and other dangerous patterns
-- **Session isolation** — each session has its own data directory under `data/sessions/`
-- **Input validation** — Pydantic models validate all API inputs
+- **JWT authentication** — stateless tokens, 30-day expiry
+- **SQL sanitization** — regex blocks INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE
+- **Query limits** — results capped at 50 rows, plot data at 100 rows
+- **Session isolation** — users can only access their own sessions
+- **Input validation** — Pydantic models on all endpoints
+- **File size limit** — 1 GB maximum upload
+
+## Testing
+
+```bash
+cd backend
+python -m pytest tests/ -v
+```

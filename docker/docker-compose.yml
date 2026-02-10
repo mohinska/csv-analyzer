@@ -7,7 +7,20 @@ services:
       - "8001:8001"
     env_file:
       - ../.env
+    volumes:
+      - app-data:/app/data
+      - db-data:/app/db
+    environment:
+      - DATABASE_URL=sqlite:////app/db/data_analyzer.db
+      - DATA_DIR=/app/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/docs')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
   frontend:
     build:
       context: ..
@@ -17,3 +30,7 @@ services:
     depends_on:
       - backend
     restart: unless-stopped
+
+volumes:
+  app-data:
+  db-data:

@@ -1,10 +1,11 @@
-import { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { createPortal } from "react-dom";
-import { ArrowUp, TableProperties, BarChart3, FileText, Loader2, Upload, SquarePen, X, MessageCircle, Square, Copy, Check, Download, Sparkles, Shield, Filter, FlaskConical, Code } from "lucide-react";
+import { ArrowUp, TableProperties, BarChart3, FileText, Loader2, Upload, SquarePen, X, MessageCircle, Square, Copy, Check, Download, Sparkles, Shield, Filter, FlaskConical, LogOut } from "lucide-react";
+import { AuthPage } from "./components/AuthPage";
 import { DataTab } from "./components/DataTab";
-import { PlotsTab, PlotData } from "./components/PlotsTab";
 import { MarkdownLatex } from "./components/MarkdownLatex";
-import { Chart, ChartConfig, ChartTheme } from "./components/Chart";
+import { VegaChart } from "./components/VegaChart";
+import { TableBlock } from "./components/TableBlock";
 
 interface FileInfo {
   filename: string;
@@ -14,26 +15,24 @@ interface FileInfo {
   preview: Record<string, unknown>[];
 }
 
-interface JudgeVerdict {
-  relevance: number;
-  accuracy: number;
-  completeness: number;
-  verdict: "pass" | "warn" | "retry";
-  feedback: string;
-  turn?: boolean;
+interface SessionSummary {
+  id: string;
+  title: string;
+  created_at: string;
 }
 
 interface Message {
   id: number;
   role: "user" | "assistant" | "system";
   text: string;
+  type?: string;
   fileName?: string;
-  plotPath?: string;
   plotTitle?: string;
-  chartConfig?: ChartConfig;
-  chartData?: Record<string, unknown>[];
-  codeSnippet?: string;
-  judgeVerdict?: JudgeVerdict;
+  vegaLiteSpec?: Record<string, unknown>;
+  // table fields
+  tableTitle?: string;
+  tableHeaders?: string[];
+  tableRows?: unknown[][];
 }
 
 function GlassPanel({ children, className, style }: { children: React.ReactNode; className?: string; style?: React.CSSProperties }) {
@@ -69,34 +68,136 @@ function GlassPanel({ children, className, style }: { children: React.ReactNode;
 }
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<"data" | "plots">("data");
+  const [token, setToken] = useState<string | null>(() => localStorage.getItem("auth_token"));
+
+  const handleAuth = (newToken: string) => {
+    localStorage.setItem("auth_token", newToken);
+    setToken(newToken);
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem("auth_token");
+    setToken(null);
+  };
+
+  if (!token) {
+    return <AuthPage onAuth={handleAuth} />;
+  }
+
+  return <MainApp token={token} onLogout={handleLogout} />;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function mapRestoreMessage(msg: any): Message {
+  const base: Message = {
+    id: msg.id,
+    role: msg.role as "user" | "assistant" | "system",
+    text: msg.text,
+    type: msg.type || undefined,
+    plotTitle: msg.plot_title,
+    vegaLiteSpec: msg.plot_data?.vega_lite_spec,
+  };
+  if (msg.type === "table" && msg.plot_data) {
+    base.tableTitle = msg.text;
+    base.tableHeaders = msg.plot_data.headers;
+    base.tableRows = msg.plot_data.rows;
+  }
+  return base;
+}
+
+function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
+  // Fetch wrapper that auto-logs out on 401 (expired/invalid token)
+  const authFetch = async (url: string, options: RequestInit = {}) => {
+    const response = await fetch(url, {
+      ...options,
+      headers: { ...options.headers as Record<string, string>, Authorization: `Bearer ${token}` },
+    });
+    if (response.status === 401) {
+      onLogout();
+      throw new Error("Session expired. Please log in again.");
+    }
+    return response;
+  };
+
+  const [activeTab, setActiveTab] = useState<"data" | "history">("data");
   const [chatInput, setChatInput] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [fileInfo, setFileInfo] = useState<FileInfo | null>(null);
   const [isDragging, setIsDragging] = useState(false);
-  const [plots, setPlots] = useState<PlotData[]>([]);
-  const [fullscreenPlot, setFullscreenPlot] = useState<{ title: string; chartConfig: ChartConfig; chartData: Record<string, unknown>[]; codeSnippet?: string; plotId: number } | null>(null);
-  const [dataVersion, setDataVersion] = useState<"current" | "original">("current");
+  const [fullscreenPlot, setFullscreenPlot] = useState<{ title: string; vegaLiteSpec: Record<string, unknown>; plotId: number } | null>(null);
+
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
-  const [suggestions, setSuggestions] = useState<{ text: string; category: string }[]>([]);
+  const [sessionTitle, setSessionTitle] = useState<string | null>(null);
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+
   const [showFullData, setShowFullData] = useState(false);
-  const [fullDataRows, setFullDataRows] = useState<Record<string, unknown>[] | null>(null);
-  const [fullDataLoading, setFullDataLoading] = useState(false);
-  const [mobileView, setMobileView] = useState<"chat" | "data" | "plots">("chat");
+  const [mobileView, setMobileView] = useState<"chat" | "data" | "history">("chat");
   const [isMobile, setIsMobile] = useState(false);
   const [copiedId, setCopiedId] = useState<number | null>(null);
-  const [plotThemes, setPlotThemes] = useState<Record<number, ChartTheme>>({});
+  const [loadingSessionId, setLoadingSessionId] = useState<string | null>(null);
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
+  const [isSavingPlot, setIsSavingPlot] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(340);
   const [featurePopup, setFeaturePopup] = useState<number | null>(null);
-  const [codeCopiedModal, setCodeCopiedModal] = useState(false);
-  const [exportPlot, setExportPlot] = useState<{ title: string; chartConfig: ChartConfig; chartData: Record<string, unknown>[] } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const plotExportRef = useRef<HTMLDivElement>(null);
-  const offscreenExportRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const dragCounterRef = useRef(0);
-  const abortControllerRef = useRef<AbortController | null>(null);
+  const sidebarRef = useRef<HTMLDivElement>(null);
+  const isDraggingDelimiterRef = useRef(false);
+  const dragStartRef = useRef({ x: 0, width: 0 });
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectAttemptsRef = useRef(0);
+  const autoAnalyzePendingRef = useRef(false);
+  const responseReceivedRef = useRef(false);
+  const handleWSEventRef = useRef<(event: string, data: Record<string, unknown>) => void>(() => {});
+
+  // Status queue: show each status for at least 5s before switching
+  const statusQueueRef = useRef<string[]>([]);
+  const statusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastStatusTimeRef = useRef(0);
+  const STATUS_MIN_DISPLAY = 2500;
+
+  const showNextStatus = useRef(() => {
+    if (statusQueueRef.current.length === 0) {
+      statusTimerRef.current = null;
+      return;
+    }
+    const next = statusQueueRef.current.shift()!;
+    lastStatusTimeRef.current = Date.now();
+    setStatusMessage(next);
+    if (statusQueueRef.current.length > 0) {
+      statusTimerRef.current = setTimeout(() => showNextStatus.current(), STATUS_MIN_DISPLAY);
+    } else {
+      statusTimerRef.current = null;
+    }
+  }).current;
+
+  const enqueueStatus = useRef((msg: string) => {
+    const elapsed = Date.now() - lastStatusTimeRef.current;
+    if (elapsed >= STATUS_MIN_DISPLAY && !statusTimerRef.current) {
+      lastStatusTimeRef.current = Date.now();
+      setStatusMessage(msg);
+    } else {
+      statusQueueRef.current.push(msg);
+      if (!statusTimerRef.current) {
+        const delay = STATUS_MIN_DISPLAY - elapsed;
+        statusTimerRef.current = setTimeout(() => showNextStatus(), delay);
+      }
+    }
+  }).current;
+
+  const clearStatusQueue = useRef(() => {
+    if (statusTimerRef.current) {
+      clearTimeout(statusTimerRef.current);
+      statusTimerRef.current = null;
+    }
+    statusQueueRef.current.length = 0;
+  }).current;
 
   const hasContent = chatInput.trim().length > 0;
 
@@ -109,6 +210,30 @@ export default function App() {
     return () => mq.removeEventListener("change", handler);
   }, []);
 
+  // Sidebar resize drag handler (direct DOM manipulation for smoothness, sync state on mouseup)
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (!isDraggingDelimiterRef.current) return;
+      const delta = e.clientX - dragStartRef.current.x;
+      const w = Math.min(600, Math.max(200, dragStartRef.current.width + delta));
+      if (sidebarRef.current) sidebarRef.current.style.width = `${w}px`;
+    };
+    const onUp = (e: MouseEvent) => {
+      if (!isDraggingDelimiterRef.current) return;
+      isDraggingDelimiterRef.current = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      const delta = e.clientX - dragStartRef.current.x;
+      setSidebarWidth(Math.min(600, Math.max(200, dragStartRef.current.width + delta)));
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, []);
+
   // Close fullscreen data on Escape
   useEffect(() => {
     if (!showFullData) return;
@@ -119,159 +244,38 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [showFullData]);
 
-  // Fetch all data rows when fullscreen modal opens
-  useEffect(() => {
-    if (!showFullData || !sessionId) {
-      if (!showFullData) setFullDataRows(null);
-      return;
-    }
-    setFullDataLoading(true);
-    fetch(`api/preview/${sessionId}?rows=99999&version=${dataVersion}`)
-      .then(res => res.json())
-      .then(data => {
-        setFullDataRows(data.preview);
-        setFullDataLoading(false);
-      })
-      .catch(() => setFullDataLoading(false));
-  }, [showFullData, sessionId, dataVersion]);
-
-  // Save messages to localStorage whenever they change
-  useEffect(() => {
-    if (sessionId && messages.length > 0) {
-      localStorage.setItem(`chat_messages_${sessionId}`, JSON.stringify(messages));
-    }
-  }, [messages, sessionId]);
-
-  // Restore session from backend on mount
+  // Restore session from backend on mount (no session creation — that happens on upload)
   useEffect(() => {
     const initSession = async () => {
       const savedSessionId = localStorage.getItem("csv_analyzer_session_id");
+      if (!savedSessionId) return; // No session to restore — stay in upload state
 
-      if (savedSessionId) {
-        // Try to restore existing session from backend
-        try {
-          // Check if session exists and has file
-          const sessionResponse = await fetch(`/api/session/${savedSessionId}`);
-          if (sessionResponse.ok) {
-            const sessionData = await sessionResponse.json();
-
-            if (sessionData.session) {
-              setSessionId(savedSessionId);
-
-              // Restore file info if session has file
-              if (sessionData.has_file && sessionData.session) {
-                setFileInfo({
-                  filename: sessionData.session.filename,
-                  row_count: sessionData.session.row_count,
-                  column_count: sessionData.session.column_count,
-                  columns: sessionData.session.columns,
-                  preview: [], // Will load preview separately if needed
-                });
-
-                // Load full preview
-                const previewResponse = await fetch(`/api/preview/${savedSessionId}`);
-                if (previewResponse.ok) {
-                  const previewData = await previewResponse.json();
-                  setFileInfo({
-                    filename: previewData.filename,
-                    row_count: previewData.row_count,
-                    column_count: previewData.column_count,
-                    columns: previewData.columns,
-                    preview: previewData.preview,
-                  });
-                }
-              }
-
-              // Load chat history - try backend first, then localStorage fallback
-              let messagesRestored = false;
-              try {
-                const historyResponse = await fetch(`/api/chat/${savedSessionId}/history`);
-                if (historyResponse.ok) {
-                  const historyData = await historyResponse.json();
-                  if (historyData.messages && historyData.messages.length > 0) {
-                    const restoredMessages: Message[] = historyData.messages.map((msg: {
-                      id: number;
-                      role: string;
-                      text: string;
-                      type?: string;
-                      plot_path?: string;
-                      plot_title?: string;
-                      plot_data?: { chart_config?: ChartConfig; chart_data?: Record<string, unknown>[] };
-                    }) => ({
-                      id: msg.id,
-                      role: msg.role as "user" | "assistant" | "system",
-                      text: msg.text,
-                      plotPath: msg.plot_path,
-                      plotTitle: msg.plot_title,
-                      chartConfig: msg.plot_data?.chart_config,
-                      chartData: msg.plot_data?.chart_data,
-                    }));
-                    setMessages(restoredMessages);
-                    messagesRestored = true;
-                  }
-                }
-              } catch {
-                console.log("Failed to load from backend, trying localStorage");
-              }
-
-              // Fallback to localStorage if backend failed
-              if (!messagesRestored) {
-                const savedMessages = localStorage.getItem(`chat_messages_${savedSessionId}`);
-                if (savedMessages) {
-                  try {
-                    const parsed = JSON.parse(savedMessages);
-                    setMessages(parsed);
-                  } catch {
-                    console.log("Failed to parse localStorage messages");
-                  }
-                }
-              }
-
-              // Load plots from backend
-              const plotsResponse = await fetch(`/api/plots/${savedSessionId}`);
-              if (plotsResponse.ok) {
-                const plotsData = await plotsResponse.json();
-                if (plotsData.plots && plotsData.plots.length > 0) {
-                  const restoredPlots: PlotData[] = plotsData.plots.map((plot: { id: string; title: string; columns_used: string; summary?: string; path?: string; chart_config?: ChartConfig; chart_data?: Record<string, unknown>[] }) => ({
-                    id: parseInt(plot.id) || Date.now(),
-                    title: plot.title,
-                    columnsUsed: plot.columns_used || "",
-                    summary: plot.summary || "",
-                    insights: "",
-                    chartConfig: plot.chart_config,
-                    chartData: plot.chart_data,
-                  }));
-                  setPlots(restoredPlots);
-                }
-              }
-
-              return;
-            }
-          }
-        } catch {
-          // Session expired or error, try localStorage fallback
-          console.log("Session restore failed, checking localStorage");
-          const savedMessages = localStorage.getItem(`chat_messages_${savedSessionId}`);
-          if (savedMessages) {
-            try {
-              setSessionId(savedSessionId);
-              setMessages(JSON.parse(savedMessages));
-              return;
-            } catch {
-              console.log("Failed to parse localStorage messages");
-            }
-          }
-        }
-      }
-
-      // Create new session
       try {
-        const response = await fetch("/api/session", { method: "POST" });
+        const response = await authFetch(`/api/sessions/${savedSessionId}`);
+        if (!response.ok) throw new Error("Session not found");
+
         const data = await response.json();
-        setSessionId(data.session_id);
-        localStorage.setItem("csv_analyzer_session_id", data.session_id);
-      } catch (error) {
-        console.error("Failed to create session:", error);
+        setSessionId(savedSessionId);
+
+        // Restore file info
+        if (data.file) {
+          setFileInfo({
+            filename: data.file.filename,
+            row_count: data.file.row_count,
+            column_count: data.file.column_count,
+            columns: data.file.columns,
+            preview: data.file.preview,
+          });
+        }
+
+        // Restore title + messages
+        setSessionTitle(data.title || null);
+        if (data.messages?.length > 0) {
+          setMessages(data.messages.filter((m: any) => m.type !== "query_result").map(mapRestoreMessage));
+        }
+      } catch {
+        // Session gone or expired — clear stale data, stay in upload state
+        localStorage.removeItem("csv_analyzer_session_id");
       }
     };
     initSession();
@@ -281,253 +285,287 @@ export default function App() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // New chat handler
-  const handleNewChat = async () => {
-    // Clear localStorage for old session
-    if (sessionId) {
-      localStorage.removeItem(`chat_messages_${sessionId}`);
-    }
+  // New chat — clear everything, return to upload state
+  const handleNewChat = () => {
     localStorage.removeItem("csv_analyzer_session_id");
-
-    // Reset state
+    setSessionId(null);
+    setSessionTitle(null);
     setMessages([]);
     setFileInfo(null);
     setChatInput("");
-    setPlots([]);
-    setDataVersion("current");
-
-    // Create new session
-    try {
-      const response = await fetch("/api/session", { method: "POST" });
-      const data = await response.json();
-      setSessionId(data.session_id);
-      localStorage.setItem("csv_analyzer_session_id", data.session_id);
-    } catch (error) {
-      console.error("Failed to create session:", error);
-    }
+    setStatusMessage(null);
   };
 
-  // Save message to backend
-  const saveMessageToBackend = async (role: string, text: string, messageType: string = "text") => {
-    if (!sessionId) return;
-    try {
-      await fetch(`/api/chat/${sessionId}/message`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ role, text, message_type: messageType }),
-      });
-    } catch (error) {
-      console.error("Failed to save message:", error);
-    }
-  };
-
-  // Upload file to backend
-  const uploadFile = async (file: File): Promise<boolean> => {
-    if (!sessionId) return false;
-
+  // Upload file — creates a new session and returns session ID + file info
+  // Throws on failure so callers can surface the actual error message
+  const uploadFile = async (file: File): Promise<{ sessionId: string; fileInfo: FileInfo }> => {
     const formData = new FormData();
     formData.append("file", file);
 
-    try {
-      const response = await fetch(`/api/upload/${sessionId}`, {
-        method: "POST",
-        body: formData,
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.detail || "Upload failed");
-      }
-
-      const data = await response.json();
-      setFileInfo({
-        filename: data.filename,
-        row_count: data.row_count,
-        column_count: data.column_count,
-        columns: data.columns,
-        preview: data.preview,
-      });
-
-      return true;
-    } catch (error) {
-      console.error("Upload failed:", error);
-      return false;
-    }
-  };
-
-  // Send chat message via SSE stream
-  const sendChatMessage = async (message: string, internal = false): Promise<void> => {
-    if (!sessionId) return;
-
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
-
-    const response = await fetch("/api/chat", {
+    const response = await authFetch("/api/upload", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        session_id: sessionId,
-        message,
-        stream: true,
-        internal,
-      }),
-      signal: controller.signal,
+      body: formData,
     });
 
     if (!response.ok) {
       const error = await response.json();
-      throw new Error(error.detail || "Chat failed");
+      throw new Error(error.detail || "Upload failed");
     }
 
-    const reader = response.body?.getReader();
-    if (!reader) throw new Error("No response body");
-
-    const decoder = new TextDecoder();
-    let buffer = "";
-    let receivedResponse = false;
-
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-
-        // Parse SSE events
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        let currentEvent = "";
-        for (const line of lines) {
-          if (line.startsWith("event: ")) {
-            currentEvent = line.slice(7);
-          } else if (line.startsWith("data: ") && currentEvent) {
-            try {
-              const data = JSON.parse(line.slice(6));
-              if (currentEvent === "text" || currentEvent === "plot" || currentEvent === "error") {
-                receivedResponse = true;
-              }
-              handleSSEEvent(currentEvent, data);
-            } catch {
-              // Ignore parse errors
-            }
-            currentEvent = "";
-          }
-        }
-      }
-    } finally {
-      abortControllerRef.current = null;
-    }
-
-    // Safety net: if stream ended without any visible response, show fallback
-    if (!receivedResponse) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: Date.now(),
-          role: "assistant",
-          text: "I wasn't able to produce a response. Please try rephrasing your question.",
-        },
-      ]);
-    }
+    const data = await response.json();
+    return {
+      sessionId: data.session_id,
+      fileInfo: {
+        filename: data.file.filename,
+        row_count: data.file.row_count,
+        column_count: data.file.column_count,
+        columns: data.file.columns,
+        preview: data.file.preview,
+      },
+    };
   };
 
-  // Handle SSE events from planner
-  const handleSSEEvent = (eventType: string, data: Record<string, unknown>) => {
+  // WebSocket event handler — ref ensures latest closures without reconnecting
+  handleWSEventRef.current = (eventType: string, data: Record<string, unknown>) => {
     switch (eventType) {
+      case "text_delta":
+        responseReceivedRef.current = true;
+        setMessages((prev) => {
+          const last = prev[prev.length - 1];
+          if (last && last.role === "assistant" && (last as Record<string, unknown>)._streaming) {
+            return [
+              ...prev.slice(0, -1),
+              { ...last, text: last.text + (data.delta as string) },
+            ];
+          }
+          return [
+            ...prev,
+            { id: Date.now(), role: "assistant", text: data.delta as string, _streaming: true } as typeof last,
+          ];
+        });
+        break;
+
       case "text":
+        responseReceivedRef.current = true;
+        setMessages((prev) => {
+          // Replace streaming message with final text, or append new
+          const last = prev[prev.length - 1];
+          if (last && last.role === "assistant" && (last as Record<string, unknown>)._streaming) {
+            const { _streaming, ...rest } = last as Record<string, unknown>;
+            return [
+              ...prev.slice(0, -1),
+              { ...rest, text: data.text as string } as typeof last,
+            ];
+          }
+          return [
+            ...prev,
+            { id: Date.now(), role: "assistant", text: data.text as string },
+          ];
+        });
+        break;
+
+      case "plot":
+        responseReceivedRef.current = true;
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: Date.now(),
+            role: "system",
+            text: data.title as string,
+            plotTitle: data.title as string,
+            vegaLiteSpec: data.vega_lite_spec as Record<string, unknown> | undefined,
+          },
+        ]);
+        break;
+
+      case "table":
+        responseReceivedRef.current = true;
         setMessages((prev) => [
           ...prev,
           {
             id: Date.now(),
             role: "assistant",
-            text: data.text as string,
-          },
-        ]);
-        break;
-
-      case "plot":
-        // Use shared stable ID for plots and messages
-        const plotMsgId = Date.now();
-        // Add plot to plots array
-        const plotData: PlotData = {
-          id: plotMsgId,
-          title: data.title as string,
-          columnsUsed: (data.columns_used as string) || "",
-          summary: (data.summary as string) || "",
-          insights: "",
-          chartConfig: data.chart_config as ChartConfig | undefined,
-          chartData: data.chart_data as Record<string, unknown>[] | undefined,
-          codeSnippet: (data.code_snippet as string) || undefined,
-        };
-        setPlots((prev) => [...prev, plotData]);
-
-        // Add inline plot message to chat
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: plotMsgId,
-            role: "system",
             text: data.title as string,
-            plotTitle: data.title as string,
-            chartConfig: data.chart_config as ChartConfig | undefined,
-            chartData: data.chart_data as Record<string, unknown>[] | undefined,
-            codeSnippet: (data.code_snippet as string) || undefined,
+            type: "table",
+            tableTitle: data.title as string,
+            tableHeaders: data.headers as string[],
+            tableRows: data.rows as unknown[][],
           },
         ]);
-        break;
-
-      case "query_result":
-        // Log errors to console only, don't show to user
-        if (data.is_error) {
-          console.error("[Query Error]", data.result);
-        }
         break;
 
       case "error":
+        responseReceivedRef.current = true;
         console.error("[Chat Error]", data.message);
+        setMessages((prev) => [
+          ...prev,
+          { id: Date.now(), role: "assistant", text: `Error: ${data.message}` },
+        ]);
         break;
-
-      case "judge": {
-        const verdict: JudgeVerdict = {
-          relevance: data.relevance as number,
-          accuracy: data.accuracy as number,
-          completeness: data.completeness as number,
-          verdict: data.verdict as "pass" | "warn" | "retry",
-          feedback: data.feedback as string,
-          turn: data.turn as boolean | undefined,
-        };
-        // Attach judge verdict to the last assistant message
-        if (!verdict.turn) {
-          setMessages((prev) => {
-            const msgs = [...prev];
-            for (let i = msgs.length - 1; i >= 0; i--) {
-              if (msgs[i].role === "assistant") {
-                msgs[i] = { ...msgs[i], judgeVerdict: verdict };
-                break;
-              }
-            }
-            return msgs;
-          });
-        }
-        break;
-      }
 
       case "status":
-        setStatusMessage(data.message as string);
+        enqueueStatus(data.message as string);
         break;
 
       case "done":
+        clearStatusQueue();
         setStatusMessage(null);
-        // Refresh data if updated
         if (data.data_updated) {
           refreshFileInfo();
         }
-        // Show follow-up suggestions
-        if (data.suggestions && Array.isArray(data.suggestions) && data.suggestions.length > 0) {
-          setSuggestions(data.suggestions as { text: string; category: string }[]);
+        setSuggestions((data.suggestions as string[]) || []);
+        setIsLoading(false);
+        // Safety net: no visible response received for this turn
+        if (!responseReceivedRef.current) {
+          setMessages((prev) => [
+            ...prev,
+            { id: Date.now(), role: "assistant", text: "I wasn't able to produce a response. Please try rephrasing your question." },
+          ]);
         }
         break;
+
+      case "session_update":
+        setSessionTitle(data.title as string);
+        break;
+    }
+  };
+
+  // WebSocket connection — connect when session is active, auto-reconnect
+  useEffect(() => {
+    if (!sessionId || !token) {
+      if (wsRef.current) {
+        wsRef.current.close(1000);
+        wsRef.current = null;
+      }
+      return;
+    }
+
+    let intentionalClose = false;
+
+    const connect = () => {
+      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const ws = new WebSocket(
+        `${protocol}//${window.location.host}/api/sessions/${sessionId}/ws?token=${encodeURIComponent(token)}`
+      );
+
+      ws.onopen = () => {
+        reconnectAttemptsRef.current = 0;
+        // Send queued auto_analyze if pending (after file upload)
+        if (autoAnalyzePendingRef.current) {
+          autoAnalyzePendingRef.current = false;
+          responseReceivedRef.current = false;
+          ws.send(JSON.stringify({ type: "auto_analyze" }));
+        }
+      };
+
+      ws.onmessage = (e) => {
+        try {
+          const msg = JSON.parse(e.data);
+          handleWSEventRef.current(msg.event, msg.data);
+        } catch {
+          console.error("[WS] Failed to parse message:", e.data);
+        }
+      };
+
+      ws.onclose = () => {
+        if (intentionalClose) return;
+        const attempts = reconnectAttemptsRef.current;
+        if (attempts < 5) {
+          const delay = Math.min(1000 * Math.pow(2, attempts), 30000);
+          reconnectTimeoutRef.current = setTimeout(() => {
+            reconnectAttemptsRef.current++;
+            connect();
+          }, delay);
+        } else {
+          setIsLoading(false);
+          setStatusMessage(null);
+          setMessages((prev) => [
+            ...prev,
+            { id: Date.now(), role: "system", text: "Connection lost. Please refresh the page." },
+          ]);
+        }
+      };
+
+      ws.onerror = () => {};
+
+      wsRef.current = ws;
+    };
+
+    connect();
+
+    return () => {
+      intentionalClose = true;
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
+      if (wsRef.current) {
+        wsRef.current.close(1000);
+        wsRef.current = null;
+      }
+    };
+  }, [sessionId, token]);
+
+  // Fetch session list for History tab
+  useEffect(() => {
+    const fetchSessions = async () => {
+      try {
+        const response = await authFetch("/api/sessions");
+        if (response.ok) {
+          const data = await response.json();
+          setSessions(data);
+        }
+      } catch {}
+    };
+    fetchSessions();
+  }, [token, sessionId]);
+
+  // Load a session from History tab
+  const loadSession = async (id: string) => {
+    if (id === sessionId || loadingSessionId) return;
+    setLoadingSessionId(id);
+    try {
+      const response = await authFetch(`/api/sessions/${id}`);
+      if (!response.ok) throw new Error("Session not found");
+      const data = await response.json();
+
+      setSessionId(id);
+      setSessionTitle(data.title || null);
+      localStorage.setItem("csv_analyzer_session_id", id);
+
+      if (data.file) {
+        setFileInfo({
+          filename: data.file.filename,
+          row_count: data.file.row_count,
+          column_count: data.file.column_count,
+          columns: data.file.columns,
+          preview: data.file.preview,
+        });
+      }
+
+      if (data.messages?.length > 0) {
+        setMessages(data.messages.filter((m: any) => m.type !== "query_result").map(mapRestoreMessage));
+      } else {
+        setMessages([]);
+      }
+    } catch {
+      // Session gone — refresh list
+      setSessions((prev) => prev.filter((s) => s.id !== id));
+    } finally {
+      setLoadingSessionId(null);
+    }
+  };
+
+  const deleteSession = async (id: string) => {
+    setDeletingSessionId(id);
+    try {
+      await authFetch(`/api/sessions/${id}`, { method: "DELETE" });
+      setSessions((prev) => prev.filter((s) => s.id !== id));
+      if (id === sessionId) {
+        handleNewChat();
+      }
+    } catch {} finally {
+      setDeletingSessionId(null);
     }
   };
 
@@ -536,17 +574,16 @@ export default function App() {
     if (!sessionId) return;
 
     try {
-      const response = await fetch(`/api/preview/${sessionId}?version=current`);
+      const response = await authFetch(`/api/sessions/${sessionId}`);
       if (response.ok) {
         const data = await response.json();
-        // Only update if viewing current version
-        if (dataVersion === "current") {
+        if (data.file) {
           setFileInfo({
-            filename: data.filename,
-            row_count: data.row_count,
-            column_count: data.column_count,
-            columns: data.columns,
-            preview: data.preview,
+            filename: data.file.filename,
+            row_count: data.file.row_count,
+            column_count: data.file.column_count,
+            columns: data.file.columns,
+            preview: data.file.preview,
           });
         }
       }
@@ -555,36 +592,24 @@ export default function App() {
     }
   };
 
-  // Switch between original and current version
-  const switchVersion = async (version: "current" | "original") => {
-    if (!sessionId) return;
-    setDataVersion(version);
+  // Upload file — creates session, sets state, triggers auto-analysis via WS
+  const MAX_FILE_SIZE = 1024 * 1024 * 1024; // 1 GB
 
-    try {
-      const response = await fetch(`/api/preview/${sessionId}?version=${version}`);
-      if (response.ok) {
-        const data = await response.json();
-        setFileInfo({
-          filename: data.filename,
-          row_count: data.row_count,
-          column_count: data.column_count,
-          columns: data.columns,
-          preview: data.preview,
-        });
-      }
-    } catch (error) {
-      console.error("Failed to switch version:", error);
-    }
-  };
-
-  // Auto-upload file when attached
   const handleFileUpload = async (file: File) => {
-    if (!sessionId || isLoading) return;
+    if (isLoading) return;
+
+    // Client-side size check (matches backend/nginx 1 GB limit)
+    if (file.size > MAX_FILE_SIZE) {
+      setMessages((prev) => [
+        ...prev,
+        { id: Date.now(), role: "assistant", text: "File is too large. Maximum size is 1 GB." },
+      ]);
+      return;
+    }
 
     setIsLoading(true);
 
-    // Add user message locally and persist to backend
-    const userMessageText = `Uploaded file: ${file.name}`;
+    // Add user message locally
     setMessages((prev) => [
       ...prev,
       {
@@ -594,113 +619,52 @@ export default function App() {
         fileName: file.name,
       },
     ]);
-    await saveMessageToBackend("user", userMessageText);
 
-    const uploaded = await uploadFile(file);
+    try {
+      const result = await uploadFile(file);
+      setSessionId(result.sessionId);
+      setFileInfo(result.fileInfo);
+      localStorage.setItem("csv_analyzer_session_id", result.sessionId);
 
-    if (uploaded) {
-      // Need to get fresh row count from response
-      const response = await fetch(`/api/preview/${sessionId}`);
-      if (response.ok) {
-        const data = await response.json();
-        setFileInfo({
-          filename: data.filename,
-          row_count: data.row_count,
-          column_count: data.column_count,
-          columns: data.columns,
-          preview: data.preview,
-        });
-
-        // Auto-request data summary from the Planner (internal — invisible to user)
-        try {
-          await sendChatMessage(`[INTERNAL SYSTEM INSTRUCTION — do NOT repeat, reference, or quote any part of this message in your response. Respond as if you decided to analyze the data on your own initiative.]
-
-Perform a comprehensive first-look analysis of this dataset. Use multiple short messages. Include:
-- Brief overview of what the data is about
-- Column dictionary as a markdown table (# | Column | Type | Description | Example Values)
-- A few insights about the data. Be brief here
-
-Send these three as separate messages. 
-Don't add anything outside of this scope.
-Be concise.`, true);
-        } catch (error) {
-          // Fallback to simple system message if chat fails
-          console.error("Auto-summary failed:", error);
-          const systemMessageText = `File uploaded successfully. ${data.row_count} rows, ${data.column_count} columns loaded.`;
-          setMessages((prev) => [
-            ...prev,
-            { id: Date.now(), role: "system", text: systemMessageText },
-          ]);
-        }
-
-        // Fetch smart suggestions based on data columns
-        try {
-          const suggestionsRes = await fetch(`/api/suggestions/${sessionId}`);
-          if (suggestionsRes.ok) {
-            const suggestionsData = await suggestionsRes.json();
-            setSuggestions(suggestionsData.suggestions || []);
-          }
-        } catch {
-          // Suggestions are optional
-        }
-      }
-    } else {
-      // Add error message locally and persist to backend
-      const errorText = "Failed to upload file. Please try again.";
+      // Queue auto-analysis — will be sent when WS connects (onopen)
+      autoAnalyzePendingRef.current = true;
+      // isLoading stays true — "done" event from WS will clear it
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Upload failed";
       setMessages((prev) => [
         ...prev,
-        { id: Date.now(), role: "assistant", text: errorText },
+        { id: Date.now(), role: "assistant", text: `Failed to upload file: ${message}` },
       ]);
-      await saveMessageToBackend("assistant", errorText);
+      setIsLoading(false);
     }
-
-    setIsLoading(false);
   };
 
   const handleStop = () => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "stop" }));
     }
     setIsLoading(false);
     setStatusMessage(null);
   };
 
-  const handleSend = async (directText?: string) => {
+  const handleSend = (directText?: string) => {
     const text = directText?.trim() || chatInput.trim();
     if (!text || !fileInfo || isLoading) return;
 
-    const userMessage: Message = {
-      id: Date.now(),
-      role: "user",
-      text,
-    };
-
-    setMessages((prev) => [...prev, userMessage]);
-    setSuggestions([]);
-    setChatInput("");
-    setIsLoading(true);
-
-    try {
-      await sendChatMessage(text);
-    } catch (error) {
-      // Ignore abort errors (user clicked stop)
-      if (error instanceof DOMException && error.name === "AbortError") {
-        return;
-      }
-      console.error("[Send Error]", error);
+    if (wsRef.current?.readyState !== WebSocket.OPEN) {
       setMessages((prev) => [
         ...prev,
-        {
-          id: Date.now(),
-          role: "assistant",
-          text: "Something went wrong. The server may have restarted — please refresh the page and re-upload your file.",
-        },
+        { id: Date.now(), role: "system", text: "Not connected to server. Please wait or refresh the page." },
       ]);
-    } finally {
-      setIsLoading(false);
-      setStatusMessage(null);
+      return;
     }
+
+    setMessages((prev) => [...prev, { id: Date.now(), role: "user", text }]);
+    setChatInput("");
+    setSuggestions([]);
+    setIsLoading(true);
+    responseReceivedRef.current = false;
+    wsRef.current.send(JSON.stringify({ type: "message", text }));
   };
 
   const handleCopyMessage = async (msgId: number, text: string) => {
@@ -715,7 +679,8 @@ Be concise.`, true);
 
   const handleSavePlotPng = async () => {
     const el = plotExportRef.current;
-    if (!el) return;
+    if (!el || isSavingPlot) return;
+    setIsSavingPlot(true);
     try {
       const { default: html2canvas } = await import("html2canvas");
       const canvas = await html2canvas(el, { backgroundColor: "#1e1b2e", scale: 2 });
@@ -734,12 +699,15 @@ Be concise.`, true);
       link.href = URL.createObjectURL(svgBlob);
       link.click();
       URL.revokeObjectURL(link.href);
+    } finally {
+      setIsSavingPlot(false);
     }
   };
 
   // Direct save: capture chart element from DOM and download as PNG
   const handleDirectSavePlot = async (title: string, chartElement: HTMLElement | null) => {
-    if (!chartElement) return;
+    if (!chartElement || isSavingPlot) return;
+    setIsSavingPlot(true);
     try {
       const { default: html2canvas } = await import("html2canvas");
       const canvas = await html2canvas(chartElement, { backgroundColor: "#161328", scale: 2 });
@@ -759,47 +727,9 @@ Be concise.`, true);
         link.click();
         URL.revokeObjectURL(link.href);
       }
+    } finally {
+      setIsSavingPlot(false);
     }
-  };
-
-  const getCodeSnippet = (codeSnippet?: string, title?: string, config?: ChartConfig): string => {
-    if (codeSnippet) return codeSnippet;
-    const type = config?.chart_type || "bar";
-    const x = config?.x_key || "x";
-    const y = config?.y_key || "y";
-    return `import pandas as pd\nimport matplotlib.pyplot as plt\n\ndf = pd.read_csv('your_data.csv')\nfig, ax = plt.subplots(figsize=(10, 6))\nax.${type === "scatter" ? "scatter" : type === "line" ? "plot" : "bar"}(df['${x}'], df['${y}'])\nax.set_title('${title || "Plot"}')\nplt.tight_layout()\nplt.show()`;
-  };
-
-  // Save plot directly (off-screen render, no modal flash)
-  const handleSavePlotFromPanel = async (plot: PlotData) => {
-    if (!plot.chartConfig || !plot.chartData) return;
-    setExportPlot({ title: plot.title, chartConfig: plot.chartConfig, chartData: plot.chartData });
-    // Wait for off-screen chart to render, then capture and clean up
-    setTimeout(async () => {
-      const el = offscreenExportRef.current;
-      if (el) {
-        try {
-          const { default: html2canvas } = await import("html2canvas");
-          const canvas = await html2canvas(el, { backgroundColor: "#1e1b2e", scale: 2 });
-          const link = document.createElement("a");
-          link.download = `${plot.title || "plot"}.png`;
-          link.href = canvas.toDataURL("image/png");
-          link.click();
-        } catch {
-          const svg = el.querySelector("svg");
-          if (svg) {
-            const svgData = new XMLSerializer().serializeToString(svg);
-            const svgBlob = new Blob([svgData], { type: "image/svg+xml;charset=utf-8" });
-            const link = document.createElement("a");
-            link.download = `${plot.title || "plot"}.svg`;
-            link.href = URL.createObjectURL(svgBlob);
-            link.click();
-            URL.revokeObjectURL(link.href);
-          }
-        }
-      }
-      setExportPlot(null);
-    }, 600);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -825,6 +755,8 @@ Be concise.`, true);
   const handleDragEnter = (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
+    // No re-upload — one file per session
+    if (sessionId) return;
     dragCounterRef.current++;
     if (e.dataTransfer.items && e.dataTransfer.items.length > 0) {
       setIsDragging(true);
@@ -851,10 +783,12 @@ Be concise.`, true);
     setIsDragging(false);
     dragCounterRef.current = 0;
 
+    // No re-upload — one file per session
+    if (sessionId) return;
+
     const files = e.dataTransfer.files;
     if (files && files.length > 0) {
       const file = files[0];
-      // Only accept CSV files
       if (file.name.endsWith(".csv") || file.name.endsWith(".parquet") || file.name.endsWith(".pq") || file.type === "text/csv") {
         handleFileUpload(file);
       }
@@ -890,7 +824,7 @@ Be concise.`, true);
               Drop CSV or Parquet file here
             </p>
             <p className="text-[12px]" style={{ color: '#a1a1aa' }}>
-              {fileInfo ? "This will replace the current file" : "Release to upload"}
+              Release to upload
             </p>
           </div>
         </div>
@@ -898,18 +832,20 @@ Be concise.`, true);
 
       {/* Left sidebar — hidden on mobile */}
       {!isMobile && (
-        <div className="flex flex-col gap-1.5 w-[340px] shrink-0 h-full min-w-0">
+        <div ref={sidebarRef} className="flex flex-col gap-1.5 shrink-0 h-full min-w-0" style={{ width: sidebarWidth, position: 'relative' }}>
           {/* Tab bar */}
           <GlassPanel className="shrink-0" style={{ backgroundColor: '#111111' }}>
             <div className="flex items-center py-2.5 px-2.5">
               <button
                 onClick={() => setActiveTab("data")}
-                className="flex-1 h-[24px] flex items-center justify-center gap-1.5 rounded-lg px-2 transition-colors"
+                className="flex-1 h-[24px] flex items-center justify-center gap-1.5 rounded-lg px-2 transition-all"
                 style={activeTab === "data" ? {
                   background: 'linear-gradient(135deg, rgba(147,51,234,0.5) 0%, rgba(107,33,168,0.6) 100%)',
                   border: '1px solid rgba(147,51,234,0.3)',
                   boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.08), 0 1px 3px rgba(0,0,0,0.2)',
                 } : { border: '1px solid transparent' }}
+                onMouseEnter={(e) => { if (activeTab !== "data") e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.1)'; }}
+                onMouseLeave={(e) => { if (activeTab !== "data") e.currentTarget.style.backgroundColor = ''; }}
               >
                 <TableProperties className="w-[14px] h-[14px]" style={{ color: activeTab === "data" ? '#fff' : '#a1a1aa' }} />
                 <span className="text-[11px]" style={{ fontWeight: 510, color: activeTab === "data" ? '#fff' : '#a1a1aa' }}>
@@ -917,17 +853,19 @@ Be concise.`, true);
                 </span>
               </button>
               <button
-                onClick={() => setActiveTab("plots")}
+                onClick={() => setActiveTab("history")}
                 className="flex-1 h-[24px] flex items-center justify-center gap-1.5 rounded-lg px-2 transition-all"
-                style={activeTab === "plots" ? {
+                style={activeTab === "history" ? {
                   background: 'linear-gradient(135deg, rgba(147,51,234,0.5) 0%, rgba(107,33,168,0.6) 100%)',
                   border: '1px solid rgba(147,51,234,0.3)',
                   boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.08), 0 1px 3px rgba(0,0,0,0.2)',
                 } : { border: '1px solid transparent' }}
+                onMouseEnter={(e) => { if (activeTab !== "history") e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.1)'; }}
+                onMouseLeave={(e) => { if (activeTab !== "history") e.currentTarget.style.backgroundColor = ''; }}
               >
-                <BarChart3 className="w-[14px] h-[14px]" style={{ color: activeTab === "plots" ? '#fff' : '#a1a1aa' }} />
-                <span className="text-[11px]" style={{ fontWeight: 510, color: activeTab === "plots" ? '#fff' : '#a1a1aa' }}>
-                  Plots
+                <MessageCircle className="w-[14px] h-[14px]" style={{ color: activeTab === "history" ? '#fff' : '#a1a1aa' }} />
+                <span className="text-[11px]" style={{ fontWeight: 510, color: activeTab === "history" ? '#fff' : '#a1a1aa' }}>
+                  History
                 </span>
               </button>
             </div>
@@ -939,26 +877,130 @@ Be concise.`, true);
               {activeTab === "data" ? (
                 <DataTab
                   fileInfo={fileInfo}
-                  dataVersion={dataVersion}
-                  onVersionChange={switchVersion}
-                  sessionId={sessionId}
                   onViewFullData={() => setShowFullData(true)}
                 />
+              ) : sessions.length === 0 ? (
+                <div className="flex flex-col h-full items-center justify-center gap-1 p-5">
+                  <p className="text-[12px] text-center" style={{ fontWeight: 470, color: '#71717a' }}>
+                    No sessions yet
+                  </p>
+                </div>
               ) : (
-                <PlotsTab plots={plots} plotThemes={plotThemes} onViewPlot={(plot) => {
-                  if (plot.chartConfig && plot.chartData) {
-                    setFullscreenPlot({ title: plot.title, chartConfig: plot.chartConfig, chartData: plot.chartData, codeSnippet: plot.codeSnippet, plotId: plot.id });
-                  }
-                }} onSavePlot={(plot) => {
-                  handleSavePlotFromPanel(plot);
-                }} />
+                <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+                  <div className="flex items-center gap-2 px-5 py-3 shrink-0" style={{ borderBottom: '1px solid rgba(147,51,234,0.12)' }}>
+                    <span className="text-[10px] shrink-0" style={{ color: '#a1a1aa' }}>
+                      {sessions.length}
+                    </span>
+                    <span className="text-[13px]" style={{ fontWeight: 590, color: '#e4e4e7' }}>Sessions</span>
+                  </div>
+                  <div className="custom-scrollbar" style={{ flex: 1, overflow: 'auto' }}>
+                    {sessions.map((s) => (
+                      <div
+                        key={s.id}
+                        className="group"
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          padding: '10px 20px',
+                          borderBottom: '1px solid rgba(147,51,234,0.08)',
+                          backgroundColor: s.id === sessionId ? 'rgba(147,51,234,0.12)' : 'transparent',
+                          cursor: loadingSessionId ? 'default' : 'pointer',
+                          transition: 'background-color 0.15s',
+                          opacity: loadingSessionId && loadingSessionId !== s.id ? 0.5 : 1,
+                        }}
+                        onClick={() => loadSession(s.id)}
+                        onMouseEnter={(e) => { if (s.id !== sessionId && !loadingSessionId) e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.06)'; }}
+                        onMouseLeave={(e) => { if (s.id !== sessionId) e.currentTarget.style.backgroundColor = s.id === sessionId ? 'rgba(147,51,234,0.12)' : 'transparent'; }}
+                      >
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 13, fontWeight: 500, color: '#e4e4e7', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {s.title || 'Untitled session'}
+                          </div>
+                          <div style={{ fontSize: 11, color: '#52525b', marginTop: 2 }}>
+                            {new Date(s.created_at).toLocaleDateString()}
+                          </div>
+                        </div>
+                        {loadingSessionId === s.id ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" style={{ flexShrink: 0, marginLeft: 8, color: '#9333ea' }} />
+                        ) : (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); deleteSession(s.id); }}
+                            disabled={!!deletingSessionId}
+                            className="opacity-0 group-hover:opacity-100 transition-opacity"
+                            style={{
+                              flexShrink: 0,
+                              marginLeft: 8,
+                              width: 24,
+                              height: 24,
+                              borderRadius: 6,
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              backgroundColor: 'transparent',
+                              border: '1px solid rgba(248,113,113,0.2)',
+                              color: '#f87171',
+                              cursor: deletingSessionId ? 'not-allowed' : 'pointer',
+                              transition: 'background-color 0.15s, border-color 0.15s',
+                            }}
+                            onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'rgba(248,113,113,0.1)'; e.currentTarget.style.borderColor = 'rgba(248,113,113,0.4)'; }}
+                            onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; e.currentTarget.style.borderColor = 'rgba(248,113,113,0.2)'; }}
+                          >
+                            {deletingSessionId === s.id ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <X className="w-3 h-3" />
+                            )}
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  <div className="shrink-0 px-5 py-3" style={{ borderTop: '1px solid rgba(147,51,234,0.12)' }}>
+                    <p className="text-[11px]" style={{ color: '#a1a1aa' }}>
+                      {sessions.length} {sessions.length === 1 ? 'session' : 'sessions'}
+                    </p>
+                  </div>
+                </div>
               )}
             </div>
           </GlassPanel>
+
+          {/* Resize handle */}
+          <div
+            style={{
+              position: 'absolute',
+              top: 0,
+              right: -12,
+              width: 12,
+              height: '100%',
+              cursor: 'col-resize',
+              zIndex: 20,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              isDraggingDelimiterRef.current = true;
+              dragStartRef.current = { x: e.clientX, width: sidebarRef.current?.offsetWidth || sidebarWidth };
+              document.body.style.cursor = 'col-resize';
+              document.body.style.userSelect = 'none';
+            }}
+            onMouseEnter={(e) => {
+              const pill = e.currentTarget.firstElementChild as HTMLElement;
+              if (pill) pill.style.backgroundColor = 'rgba(147,51,234,0.5)';
+            }}
+            onMouseLeave={(e) => {
+              const pill = e.currentTarget.firstElementChild as HTMLElement;
+              if (pill) pill.style.backgroundColor = 'rgba(147,51,234,0.2)';
+            }}
+          >
+            <div style={{ width: 3, height: 40, borderRadius: 99, backgroundColor: 'rgba(147,51,234,0.2)', transition: 'background-color 0.15s' }} />
+          </div>
         </div>
       )}
 
-      {/* Mobile: Data/Plots panel (shown when mobileView is data or plots) */}
+      {/* Mobile: Data/History panel (shown when mobileView is data or history) */}
       {isMobile && mobileView !== "chat" && (
         <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
           <GlassPanel className="flex-1" style={{ borderRadius: 0, border: 'none' }}>
@@ -966,19 +1008,85 @@ Be concise.`, true);
               {mobileView === "data" ? (
                 <DataTab
                   fileInfo={fileInfo}
-                  dataVersion={dataVersion}
-                  onVersionChange={switchVersion}
-                  sessionId={sessionId}
                   onViewFullData={() => setShowFullData(true)}
                 />
+              ) : sessions.length === 0 ? (
+                <div className="flex flex-col h-full items-center justify-center gap-1 p-5">
+                  <p className="text-[12px] text-center" style={{ fontWeight: 470, color: '#71717a' }}>
+                    No sessions yet
+                  </p>
+                </div>
               ) : (
-                <PlotsTab plots={plots} plotThemes={plotThemes} onViewPlot={(plot) => {
-                  if (plot.chartConfig && plot.chartData) {
-                    setFullscreenPlot({ title: plot.title, chartConfig: plot.chartConfig, chartData: plot.chartData, codeSnippet: plot.codeSnippet, plotId: plot.id });
-                  }
-                }} onSavePlot={(plot) => {
-                  handleSavePlotFromPanel(plot);
-                }} />
+                <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+                  <div className="flex items-center gap-2 px-5 py-3 shrink-0" style={{ borderBottom: '1px solid rgba(147,51,234,0.12)' }}>
+                    <span className="text-[10px] shrink-0" style={{ color: '#a1a1aa' }}>
+                      {sessions.length}
+                    </span>
+                    <span className="text-[13px]" style={{ fontWeight: 590, color: '#e4e4e7' }}>Sessions</span>
+                  </div>
+                  <div className="custom-scrollbar" style={{ flex: 1, overflow: 'auto' }}>
+                    {sessions.map((s) => (
+                        <div
+                          key={s.id}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            padding: '10px 20px',
+                            borderBottom: '1px solid rgba(147,51,234,0.08)',
+                            backgroundColor: s.id === sessionId ? 'rgba(147,51,234,0.12)' : 'transparent',
+                            cursor: loadingSessionId ? 'default' : 'pointer',
+                            opacity: loadingSessionId && loadingSessionId !== s.id ? 0.5 : 1,
+                          }}
+                          onClick={() => loadSession(s.id)}
+                        >
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: 13, fontWeight: 500, color: '#e4e4e7', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {s.title || 'Untitled session'}
+                            </div>
+                            <div style={{ fontSize: 11, color: '#52525b', marginTop: 2 }}>
+                              {new Date(s.created_at).toLocaleDateString()}
+                            </div>
+                          </div>
+                          {loadingSessionId === s.id ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" style={{ flexShrink: 0, marginLeft: 8, color: '#9333ea' }} />
+                          ) : (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); deleteSession(s.id); }}
+                              disabled={!!deletingSessionId}
+                              style={{
+                                flexShrink: 0,
+                                marginLeft: 8,
+                                width: 24,
+                                height: 24,
+                                borderRadius: 6,
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                backgroundColor: 'transparent',
+                                border: '1px solid rgba(248,113,113,0.2)',
+                                color: '#f87171',
+                                cursor: deletingSessionId ? 'not-allowed' : 'pointer',
+                                transition: 'background-color 0.15s, border-color 0.15s',
+                              }}
+                              onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'rgba(248,113,113,0.1)'; e.currentTarget.style.borderColor = 'rgba(248,113,113,0.4)'; }}
+                              onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; e.currentTarget.style.borderColor = 'rgba(248,113,113,0.2)'; }}
+                            >
+                              {deletingSessionId === s.id ? (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <X className="w-3 h-3" />
+                              )}
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                  </div>
+                  <div className="shrink-0 px-5 py-3" style={{ borderTop: '1px solid rgba(147,51,234,0.12)' }}>
+                    <p className="text-[11px]" style={{ color: '#a1a1aa' }}>
+                      {sessions.length} {sessions.length === 1 ? 'session' : 'sessions'}
+                    </p>
+                  </div>
+                </div>
               )}
             </div>
           </GlassPanel>
@@ -991,8 +1099,8 @@ Be concise.`, true);
         <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, paddingTop: '14px', paddingBottom: '14px' }}>
           {/* Title */}
           <div className="px-5 flex items-center justify-between" style={{ flexShrink: 0, marginBottom: 4 }}>
-            <h2 className="text-[18px]" style={{ fontWeight: 590, color: '#e4e4e7' }}>
-              AI Data Analyzer
+            <h2 className="text-[18px]" style={{ fontWeight: 590, color: '#e4e4e7', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {sessionTitle || "AI Data Analyzer"}
             </h2>
             <div className="flex items-center gap-2">
               {fileInfo && (
@@ -1011,9 +1119,24 @@ Be concise.`, true);
                   backdropFilter: 'blur(10px)',
                 }}
                 title="Start a new conversation"
+                onMouseEnter={(e) => { e.currentTarget.style.filter = 'brightness(1.2)'; e.currentTarget.style.transform = 'scale(1.04)'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.filter = ''; e.currentTarget.style.transform = ''; }}
               >
                 <SquarePen className="w-[14px] h-[14px]" style={{ color: '#fff' }} />
                 <span className="text-[12px]" style={{ fontWeight: 500, color: '#fff' }}>New</span>
+              </button>
+              <button
+                onClick={onLogout}
+                className="h-[28px] px-2.5 rounded-lg flex items-center gap-1.5 transition-all"
+                style={{
+                  backgroundColor: 'transparent',
+                  border: '1px solid rgba(147,51,234,0.2)',
+                }}
+                title="Sign out"
+                onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.1)'; e.currentTarget.style.borderColor = 'rgba(147,51,234,0.4)'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; e.currentTarget.style.borderColor = 'rgba(147,51,234,0.2)'; }}
+              >
+                <LogOut className="w-[14px] h-[14px]" style={{ color: '#a1a1aa' }} />
               </button>
             </div>
           </div>
@@ -1061,7 +1184,7 @@ Be concise.`, true);
                       {
                         icon: <Filter className="w-[15px] h-[15px]" style={{ color: '#9333ea' }} />,
                         text: "Filter, sort & explore data",
-                        details: "The Data tab gives you per-column filters with search, sorting by any column, CSV export, and version switching between original and current data. See your data change in real-time as the AI transforms it.",
+                        details: "The Data tab gives you per-column filters with search, sorting by any column, and CSV export. Browse your data with infinite scroll and column-level filtering.",
                       },
                       {
                         icon: <FlaskConical className="w-[15px] h-[15px]" style={{ color: '#9333ea' }} />,
@@ -1147,7 +1270,10 @@ Be concise.`, true);
                                     cursor: 'pointer',
                                     color: '#a1a1aa',
                                     flexShrink: 0,
+                                    transition: 'background-color 0.15s, border-color 0.15s',
                                   }}
+                                  onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.25)'; e.currentTarget.style.borderColor = 'rgba(147,51,234,0.4)'; }}
+                                  onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.1)'; e.currentTarget.style.borderColor = 'rgba(147,51,234,0.2)'; }}
                                 >
                                   <X className="w-3.5 h-3.5" />
                                 </button>
@@ -1197,9 +1323,6 @@ Be concise.`, true);
                     </div>
                   )}
 
-                  {!sessionId && (
-                    <p style={{ fontSize: 11, color: '#a1a1aa', marginTop: 12 }}>Creating session...</p>
-                  )}
                 </div>
               </div>
             ) : (
@@ -1212,7 +1335,7 @@ Be concise.`, true);
                     }`}
                   >
                     <div
-                      className={`rounded-2xl px-4 py-2.5 ${msg.chartConfig ? 'w-full' : 'max-w-[80%]'}`}
+                      className={`rounded-2xl px-4 py-2.5 ${msg.vegaLiteSpec ? 'w-full' : 'max-w-[80%]'}`}
                       style={{
                         backgroundColor: msg.role === "user" ? '#9333ea' : msg.role === "system" ? 'rgba(147,51,234,0.15)' : '#1a1625',
                         color: msg.role === "user" ? '#fff' : '#e4e4e7',
@@ -1227,13 +1350,21 @@ Be concise.`, true);
                           <span>{msg.fileName}</span>
                         </div>
                       )}
-                      <div
-                        className="text-[13px]"
-                        style={{ fontWeight: 400, color: msg.role === "user" ? '#fff' : '#e4e4e7' }}
-                      >
-                        <MarkdownLatex>{msg.text}</MarkdownLatex>
-                      </div>
-                      {/* Copy button + judge indicator for assistant messages */}
+                      {msg.type === "table" && msg.tableHeaders ? (
+                        <TableBlock
+                          title={msg.tableTitle || ""}
+                          headers={msg.tableHeaders}
+                          rows={msg.tableRows || []}
+                        />
+                      ) : (
+                        <div
+                          className="text-[13px]"
+                          style={{ fontWeight: 400, color: msg.role === "user" ? '#fff' : '#e4e4e7' }}
+                        >
+                          <MarkdownLatex>{msg.text}</MarkdownLatex>
+                        </div>
+                      )}
+                      {/* Copy button for assistant messages */}
                       {msg.role === "assistant" && (
                         <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity" style={{ marginTop: 6 }}>
                           <button
@@ -1262,69 +1393,46 @@ Be concise.`, true);
                         </div>
                       )}
                       {/* Inline chart */}
-                      {msg.chartConfig && msg.chartData && msg.chartData.length > 0 && (
-                        <div className="mt-2">
+                      {msg.vegaLiteSpec && (
+                        <div className="mt-6">
                           <div
                             className="rounded-lg overflow-hidden cursor-pointer"
                             data-chart-id={msg.id}
-                            style={{ width: '100%', height: 280, backgroundColor: plotThemes[msg.id]?.backgroundColor || '#161328', border: '1px solid rgba(147,51,234,0.12)' }}
+                            style={{ width: '100%', height: 280, backgroundColor: '#161328', border: '1px solid rgba(147,51,234,0.12)' }}
                             onClick={() => setFullscreenPlot({
                               title: msg.plotTitle || "Plot",
-                              chartConfig: msg.chartConfig!,
-                              chartData: msg.chartData!,
-                              codeSnippet: msg.codeSnippet,
+                              vegaLiteSpec: msg.vegaLiteSpec!,
                               plotId: msg.id,
                             })}
                           >
-                            <Chart config={msg.chartConfig} data={msg.chartData} theme={plotThemes[msg.id]} />
+                            <VegaChart spec={msg.vegaLiteSpec} />
                           </div>
-                          <div className="flex gap-[5px] mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <div className="flex gap-[5px] mt-5 opacity-0 group-hover:opacity-100 transition-opacity">
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
                                 const chartEl = document.querySelector(`[data-chart-id="${msg.id}"]`) as HTMLElement;
                                 handleDirectSavePlot(msg.plotTitle || "Plot", chartEl);
                               }}
+                              disabled={isSavingPlot}
                               style={{
                                 display: "flex", alignItems: "center", gap: 4, padding: "2px 8px",
                                 borderRadius: 6, backgroundColor: "transparent",
                                 border: "1px solid rgba(147,51,234,0.15)", color: "#a1a1aa",
-                                fontSize: 11, cursor: "pointer",
+                                fontSize: 11, cursor: isSavingPlot ? "not-allowed" : "pointer",
+                                opacity: isSavingPlot ? 0.6 : 1,
                               }}
-                              onMouseEnter={(e) => e.currentTarget.style.backgroundColor = "rgba(147,51,234,0.1)"}
+                              onMouseEnter={(e) => { if (!isSavingPlot) e.currentTarget.style.backgroundColor = "rgba(147,51,234,0.1)"; }}
                               onMouseLeave={(e) => e.currentTarget.style.backgroundColor = "transparent"}
                             >
-                              <Download className="w-3 h-3" /> Save
-                            </button>
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                const code = getCodeSnippet(msg.codeSnippet, msg.plotTitle, msg.chartConfig);
-                                navigator.clipboard.writeText(code);
-                                setCopiedId(msg.id);
-                                setTimeout(() => setCopiedId(null), 2000);
-                              }}
-                              style={{
-                                display: "flex", alignItems: "center", gap: 4, padding: "2px 8px",
-                                borderRadius: 6, backgroundColor: copiedId === msg.id ? "rgba(34,197,94,0.1)" : "transparent",
-                                border: `1px solid ${copiedId === msg.id ? "rgba(34,197,94,0.3)" : "rgba(147,51,234,0.15)"}`,
-                                color: copiedId === msg.id ? "#22c55e" : "#a1a1aa",
-                                fontSize: 11, cursor: "pointer",
-                              }}
-                              onMouseEnter={(e) => { if (copiedId !== msg.id) e.currentTarget.style.backgroundColor = "rgba(147,51,234,0.1)"; }}
-                              onMouseLeave={(e) => { if (copiedId !== msg.id) e.currentTarget.style.backgroundColor = "transparent"; }}
-                            >
-                              {copiedId === msg.id ? <Check className="w-3 h-3" /> : <Code className="w-3 h-3" />}
-                              {copiedId === msg.id ? "Copied" : "Code"}
+                              {isSavingPlot ? <Loader2 className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />} Save
                             </button>
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
                                 setFullscreenPlot({
                                   title: msg.plotTitle || "Plot",
-                                  chartConfig: msg.chartConfig!,
-                                  chartData: msg.chartData!,
-                                  codeSnippet: msg.codeSnippet,
+                                  vegaLiteSpec: msg.vegaLiteSpec!,
                                   plotId: msg.id,
                                 });
                               }}
@@ -1337,7 +1445,7 @@ Be concise.`, true);
                               onMouseEnter={(e) => e.currentTarget.style.backgroundColor = "rgba(147,51,234,0.1)"}
                               onMouseLeave={(e) => e.currentTarget.style.backgroundColor = "transparent"}
                             >
-                              <BarChart3 className="w-3 h-3" /> Customize
+                              <BarChart3 className="w-3 h-3" /> Fullscreen
                             </button>
                           </div>
                         </div>
@@ -1345,33 +1453,6 @@ Be concise.`, true);
                     </div>
                   </div>
                 ))}
-                {/* Suggestion chips */}
-                {suggestions.length > 0 && !isLoading && (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxWidth: 360, marginTop: 4 }}>
-                    {suggestions.map((suggestion, idx) => (
-                      <button
-                        key={idx}
-                        onClick={() => handleSend(suggestion.text)}
-                        style={{
-                          padding: '8px 14px',
-                          borderRadius: 12,
-                          backgroundColor: 'rgba(147,51,234,0.08)',
-                          border: '1px solid rgba(147,51,234,0.2)',
-                          color: '#e4e4e7',
-                          fontSize: 12,
-                          fontWeight: 470,
-                          textAlign: 'left',
-                          cursor: 'pointer',
-                          transition: 'background-color 0.15s',
-                        }}
-                        onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.15)'}
-                        onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.08)'}
-                      >
-                        {suggestion.text}
-                      </button>
-                    ))}
-                  </div>
-                )}
                 {isLoading && (
                   <div className="flex justify-start">
                     <div className="rounded-2xl px-5 py-3.5" style={{ backgroundColor: '#1a1625' }}>
@@ -1382,6 +1463,31 @@ Be concise.`, true);
                         </span>
                       </div>
                     </div>
+                  </div>
+                )}
+                {suggestions.length > 0 && !isLoading && (
+                  <div className="flex gap-2 flex-wrap mt-2">
+                    {suggestions.map((s, i) => (
+                      <button
+                        key={i}
+                        onClick={() => handleSend(s)}
+                        style={{
+                          padding: '10px 16px',
+                          borderRadius: 14,
+                          backgroundColor: 'rgba(147,51,234,0.10)',
+                          border: '1px solid rgba(147,51,234,0.25)',
+                          color: '#e4e4e7',
+                          fontSize: 13,
+                          fontWeight: 470,
+                          cursor: 'pointer',
+                          transition: 'all 0.15s',
+                        }}
+                        onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.20)'; e.currentTarget.style.borderColor = 'rgba(147,51,234,0.4)'; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.10)'; e.currentTarget.style.borderColor = 'rgba(147,51,234,0.25)'; }}
+                      >
+                        {s}
+                      </button>
+                    ))}
                   </div>
                 )}
                 <div ref={messagesEndRef} />
@@ -1404,12 +1510,14 @@ Be concise.`, true);
               <button
                 onClick={handleFileAttach}
                 disabled={isLoading}
-                className="w-full flex items-center justify-center gap-2 rounded-full px-6 py-3 transition-all disabled:opacity-50 hover:opacity-90"
+                className="w-full flex items-center justify-center gap-2 rounded-full px-6 py-3 transition-all disabled:opacity-50"
                 style={{
                   background: 'linear-gradient(135deg, rgba(147,51,234,0.5) 0%, rgba(107,33,168,0.6) 100%)',
                   border: '1px solid rgba(147,51,234,0.4)',
                   boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.1), 0 2px 4px rgba(0,0,0,0.3)',
                 }}
+                onMouseEnter={(e) => { e.currentTarget.style.filter = 'brightness(1.2)'; e.currentTarget.style.transform = 'scale(1.02)'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.filter = ''; e.currentTarget.style.transform = ''; }}
               >
                 {isLoading ? (
                   <Loader2 className="w-[15px] h-[15px] animate-spin" style={{ color: '#fff' }} />
@@ -1441,6 +1549,8 @@ Be concise.`, true);
                     className={`w-[36px] h-[36px] rounded-full flex items-center justify-center relative overflow-hidden shrink-0 transition-all duration-200 ${
                       isLoading || hasContent ? "cursor-pointer" : "cursor-default"
                     }`}
+                    onMouseEnter={(e) => { if (isLoading || hasContent) e.currentTarget.style.transform = 'scale(1.1)'; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.transform = ''; }}
                   >
                     <div className="absolute inset-0 rounded-full" style={isLoading ? {
                       background: 'linear-gradient(135deg, rgba(147,51,234,0.6) 0%, rgba(107,33,168,0.7) 100%)',
@@ -1539,7 +1649,10 @@ Be concise.`, true);
                   border: '1px solid rgba(255,255,255,0.2)',
                   cursor: 'pointer',
                   boxShadow: '0 2px 8px rgba(147,51,234,0.4)',
+                  transition: 'filter 0.15s, transform 0.15s',
                 }}
+                onMouseEnter={(e) => { e.currentTarget.style.filter = 'brightness(1.15)'; e.currentTarget.style.transform = 'scale(1.04)'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.filter = ''; e.currentTarget.style.transform = ''; }}
               >
                 <span style={{ fontSize: 18, lineHeight: 1 }}>&times;</span>
                 Close
@@ -1548,64 +1661,57 @@ Be concise.`, true);
 
             {/* Table */}
             <div className="custom-scrollbar" style={{ flex: 1, overflow: 'auto', backgroundColor: '#1e1b2e', minHeight: 0 }}>
-              {fullDataLoading ? (
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', gap: 8 }}>
-                  <Loader2 className="w-5 h-5 animate-spin" style={{ color: '#9333ea' }} />
-                  <span style={{ fontSize: 13, color: '#a1a1aa' }}>Loading all rows...</span>
-                </div>
-              ) : (
-                <table style={{ borderCollapse: 'collapse', backgroundColor: '#1e1b2e', minWidth: 'max-content', width: '100%' }}>
-                  <thead style={{ position: 'sticky', top: 0, zIndex: 10 }}>
-                    <tr>
+              <table style={{ borderCollapse: 'collapse', backgroundColor: '#1e1b2e', minWidth: 'max-content', width: '100%' }}>
+                <thead style={{ position: 'sticky', top: 0, zIndex: 10 }}>
+                  <tr>
+                    {fileInfo.columns.map((col, i) => (
+                      <th
+                        key={col}
+                        style={{
+                          height: 32,
+                          padding: '0 12px',
+                          textAlign: 'left' as const,
+                          minWidth: 120,
+                          backgroundColor: '#161328',
+                          borderBottom: '1px solid rgba(147,51,234,0.12)',
+                          ...(i > 0 ? { borderLeft: '1px solid rgba(147,51,234,0.12)' } : { paddingLeft: 16 }),
+                        }}
+                      >
+                        <span style={{ fontSize: 12, fontWeight: 700, color: '#e4e4e7', whiteSpace: 'nowrap' }}>
+                          {col}
+                        </span>
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {fileInfo.preview.map((row, rowIdx) => (
+                    <tr
+                      key={rowIdx}
+                      onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.05)'}
+                      onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+                    >
                       {fileInfo.columns.map((col, i) => (
-                        <th
+                        <td
                           key={col}
                           style={{
-                            height: 32,
+                            height: 30,
                             padding: '0 12px',
-                            textAlign: 'left' as const,
-                            minWidth: 120,
-                            backgroundColor: '#161328',
-                            borderBottom: '1px solid rgba(147,51,234,0.12)',
-                            ...(i > 0 ? { borderLeft: '1px solid rgba(147,51,234,0.12)' } : { paddingLeft: 16 }),
+                            fontSize: 12,
+                            fontWeight: 400,
+                            color: '#e4e4e7',
+                            borderBottom: '1px solid rgba(147,51,234,0.1)',
+                            whiteSpace: 'nowrap',
+                            ...(i > 0 ? { borderLeft: '1px solid rgba(147,51,234,0.1)' } : { paddingLeft: 16 }),
                           }}
                         >
-                          <span style={{ fontSize: 12, fontWeight: 700, color: '#e4e4e7', whiteSpace: 'nowrap' }}>
-                            {col}
-                          </span>
-                        </th>
+                          {String(row[col] ?? "")}
+                        </td>
                       ))}
                     </tr>
-                  </thead>
-                  <tbody>
-                    {(fullDataRows || fileInfo.preview).map((row, rowIdx) => (
-                      <tr
-                        key={rowIdx}
-                        onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.05)'}
-                        onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
-                      >
-                        {fileInfo.columns.map((col, i) => (
-                          <td
-                            key={col}
-                            style={{
-                              height: 30,
-                              padding: '0 12px',
-                              fontSize: 12,
-                              fontWeight: 400,
-                              color: '#e4e4e7',
-                              borderBottom: '1px solid rgba(147,51,234,0.1)',
-                              whiteSpace: 'nowrap',
-                              ...(i > 0 ? { borderLeft: '1px solid rgba(147,51,234,0.1)' } : { paddingLeft: 16 }),
-                            }}
-                          >
-                            {String(row[col] ?? "")}
-                          </td>
-                        ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
+                  ))}
+                </tbody>
+              </table>
             </div>
 
             {/* Footer */}
@@ -1619,10 +1725,7 @@ Be concise.`, true);
               backgroundColor: '#161328',
             }}>
               <span style={{ fontSize: 11, color: '#a1a1aa' }}>
-                {fullDataRows
-                  ? `Showing all ${fullDataRows.length} of ${fileInfo.row_count} rows`
-                  : `Showing ${fileInfo.preview.length} of ${fileInfo.row_count} rows (loading full data...)`
-                }
+                {`${fileInfo.preview.length} of ${fileInfo.row_count} rows (preview)`}
               </span>
               <span style={{ fontSize: 10, color: '#52525b' }}>
                 Press Esc to close
@@ -1646,7 +1749,7 @@ Be concise.`, true);
           {[
             { key: "chat" as const, icon: <MessageCircle className="w-[18px] h-[18px]" />, label: "Chat" },
             { key: "data" as const, icon: <TableProperties className="w-[18px] h-[18px]" />, label: "Data" },
-            { key: "plots" as const, icon: <BarChart3 className="w-[18px] h-[18px]" />, label: "Plots" },
+            { key: "history" as const, icon: <FileText className="w-[18px] h-[18px]" />, label: "History" },
           ].map((tab) => (
             <button
               key={tab.key}
@@ -1662,24 +1765,16 @@ Be concise.`, true);
                 border: 'none',
                 cursor: 'pointer',
                 color: mobileView === tab.key ? '#9333ea' : '#a1a1aa',
-                transition: 'color 0.15s',
+                transition: 'color 0.15s, background-color 0.15s',
               }}
+              onMouseEnter={(e) => { if (mobileView !== tab.key) e.currentTarget.style.color = '#c084fc'; }}
+              onMouseLeave={(e) => { if (mobileView !== tab.key) e.currentTarget.style.color = '#a1a1aa'; }}
             >
               {tab.icon}
               <span style={{ fontSize: 10, fontWeight: 510 }}>{tab.label}</span>
             </button>
           ))}
         </div>
-      )}
-
-      {/* Off-screen export container for direct PNG save */}
-      {exportPlot && createPortal(
-        <div style={{ position: 'fixed', left: '-9999px', top: 0, width: 900, height: 600, pointerEvents: 'none' }}>
-          <div ref={offscreenExportRef} style={{ width: '100%', height: '100%', backgroundColor: '#1e1b2e', padding: 16 }}>
-            <Chart config={exportPlot.chartConfig} data={exportPlot.chartData} />
-          </div>
-        </div>,
-        document.body
       )}
 
       {/* Fullscreen plot modal */}
@@ -1729,31 +1824,8 @@ Be concise.`, true);
               </span>
               <div style={{ display: 'flex', gap: 8, flexShrink: 0, marginLeft: 12 }}>
                 <button
-                  onClick={() => {
-                    const code = getCodeSnippet(fullscreenPlot.codeSnippet, fullscreenPlot.title, fullscreenPlot.chartConfig);
-                    navigator.clipboard.writeText(code);
-                    setCodeCopiedModal(true);
-                    setTimeout(() => setCodeCopiedModal(false), 2000);
-                  }}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 6,
-                    padding: '6px 14px',
-                    borderRadius: 8,
-                    backgroundColor: codeCopiedModal ? 'rgba(34,197,94,0.15)' : 'rgba(147,51,234,0.15)',
-                    color: codeCopiedModal ? '#22c55e' : '#e4e4e7',
-                    fontSize: 13,
-                    fontWeight: 510,
-                    border: `1px solid ${codeCopiedModal ? 'rgba(34,197,94,0.3)' : 'rgba(147,51,234,0.3)'}`,
-                    cursor: 'pointer',
-                  }}
-                >
-                  {codeCopiedModal ? <Check className="w-3.5 h-3.5" /> : <Code className="w-3.5 h-3.5" />}
-                  {codeCopiedModal ? 'Copied!' : 'Copy Code'}
-                </button>
-                <button
                   onClick={handleSavePlotPng}
+                  disabled={isSavingPlot}
                   style={{
                     display: 'flex',
                     alignItems: 'center',
@@ -1765,11 +1837,15 @@ Be concise.`, true);
                     fontSize: 13,
                     fontWeight: 510,
                     border: '1px solid rgba(147,51,234,0.3)',
-                    cursor: 'pointer',
+                    cursor: isSavingPlot ? 'not-allowed' : 'pointer',
+                    opacity: isSavingPlot ? 0.7 : 1,
+                    transition: 'background-color 0.15s, border-color 0.15s',
                   }}
+                  onMouseEnter={(e) => { if (!isSavingPlot) { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.25)'; e.currentTarget.style.borderColor = 'rgba(147,51,234,0.5)'; } }}
+                  onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.15)'; e.currentTarget.style.borderColor = 'rgba(147,51,234,0.3)'; }}
                 >
-                  <Download className="w-3.5 h-3.5" />
-                  Save PNG
+                  {isSavingPlot ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+                  {isSavingPlot ? 'Saving...' : 'Save PNG'}
                 </button>
                 <button
                   onClick={() => setFullscreenPlot(null)}
@@ -1786,7 +1862,10 @@ Be concise.`, true);
                     border: '1px solid rgba(255,255,255,0.2)',
                     cursor: 'pointer',
                     boxShadow: '0 2px 8px rgba(147,51,234,0.4)',
+                    transition: 'filter 0.15s, transform 0.15s',
                   }}
+                  onMouseEnter={(e) => { e.currentTarget.style.filter = 'brightness(1.15)'; e.currentTarget.style.transform = 'scale(1.04)'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.filter = ''; e.currentTarget.style.transform = ''; }}
                 >
                   <span style={{ fontSize: 18, lineHeight: 1 }}>&times;</span>
                   Close
@@ -1794,101 +1873,8 @@ Be concise.`, true);
               </div>
             </div>
             {/* Chart */}
-            <div ref={plotExportRef} style={{ flex: isMobile ? undefined : 1, minHeight: isMobile ? 300 : 0, height: isMobile ? '60vw' : undefined, maxHeight: isMobile ? '65vh' : undefined, padding: 16, backgroundColor: (plotThemes[fullscreenPlot.plotId]?.backgroundColor) || 'transparent' }}>
-              <Chart config={fullscreenPlot.chartConfig} data={fullscreenPlot.chartData} theme={plotThemes[fullscreenPlot.plotId] || {}} />
-            </div>
-            {/* Customization bar */}
-            <div style={{
-              flexShrink: 0,
-              padding: '10px 20px',
-              borderTop: '1px solid rgba(147,51,234,0.15)',
-              backgroundColor: '#161328',
-              display: 'flex',
-              alignItems: 'center',
-              gap: 16,
-              flexWrap: 'wrap',
-            }}>
-              {/* Chart color */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span style={{ fontSize: 11, color: '#a1a1aa', fontWeight: 510 }}>Color</span>
-                <div style={{ display: 'flex', gap: 4 }}>
-                  {["#9333ea", "#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#ec4899", "#06b6d4"].map((c) => (
-                    <button
-                      key={c}
-                      onClick={() => setPlotThemes((prev) => ({ ...prev, [fullscreenPlot.plotId]: { ...prev[fullscreenPlot.plotId], color: c } }))}
-                      style={{
-                        width: 20,
-                        height: 20,
-                        borderRadius: 6,
-                        backgroundColor: c,
-                        border: (plotThemes[fullscreenPlot.plotId]?.color || "#9333ea") === c ? '2px solid #fff' : '2px solid transparent',
-                        cursor: 'pointer',
-                        transition: 'border-color 0.15s',
-                      }}
-                    />
-                  ))}
-                  <label style={{ position: 'relative', width: 20, height: 20 }}>
-                    <input
-                      type="color"
-                      value={plotThemes[fullscreenPlot.plotId]?.color || "#9333ea"}
-                      onChange={(e) => setPlotThemes((prev) => ({ ...prev, [fullscreenPlot.plotId]: { ...prev[fullscreenPlot.plotId], color: e.target.value } }))}
-                      style={{ position: 'absolute', inset: 0, opacity: 0, cursor: 'pointer', width: '100%', height: '100%' }}
-                    />
-                    <div style={{
-                      width: 20,
-                      height: 20,
-                      borderRadius: 6,
-                      background: 'conic-gradient(red, yellow, lime, aqua, blue, magenta, red)',
-                      border: '2px solid rgba(255,255,255,0.2)',
-                      pointerEvents: 'none',
-                    }} />
-                  </label>
-                </div>
-              </div>
-              {/* Background color */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span style={{ fontSize: 11, color: '#a1a1aa', fontWeight: 510 }}>Background</span>
-                <div style={{ display: 'flex', gap: 4 }}>
-                  {[
-                    { value: undefined, label: "Default", bg: 'transparent', border: '2px dashed rgba(147,51,234,0.3)' },
-                    { value: "#ffffff", label: "White", bg: '#ffffff', border: '2px solid rgba(0,0,0,0.1)' },
-                    { value: "#1e1b2e", label: "Dark", bg: '#1e1b2e', border: '2px solid rgba(147,51,234,0.3)' },
-                    { value: "#0f172a", label: "Navy", bg: '#0f172a', border: '2px solid rgba(51,65,85,0.5)' },
-                    { value: "#111111", label: "Black", bg: '#111111', border: '2px solid rgba(255,255,255,0.1)' },
-                  ].map((opt) => (
-                    <button
-                      key={opt.label}
-                      onClick={() => setPlotThemes((prev) => ({ ...prev, [fullscreenPlot.plotId]: { ...prev[fullscreenPlot.plotId], backgroundColor: opt.value } }))}
-                      title={opt.label}
-                      style={{
-                        width: 20,
-                        height: 20,
-                        borderRadius: 6,
-                        backgroundColor: opt.bg,
-                        border: plotThemes[fullscreenPlot.plotId]?.backgroundColor === opt.value ? '2px solid #9333ea' : opt.border,
-                        cursor: 'pointer',
-                        transition: 'border-color 0.15s',
-                      }}
-                    />
-                  ))}
-                  <label style={{ position: 'relative', width: 20, height: 20 }}>
-                    <input
-                      type="color"
-                      value={plotThemes[fullscreenPlot.plotId]?.backgroundColor || "#1e1b2e"}
-                      onChange={(e) => setPlotThemes((prev) => ({ ...prev, [fullscreenPlot.plotId]: { ...prev[fullscreenPlot.plotId], backgroundColor: e.target.value } }))}
-                      style={{ position: 'absolute', inset: 0, opacity: 0, cursor: 'pointer', width: '100%', height: '100%' }}
-                    />
-                    <div style={{
-                      width: 20,
-                      height: 20,
-                      borderRadius: 6,
-                      background: 'conic-gradient(#333, #666, #999, #ccc, #fff, #ccc, #999, #666, #333)',
-                      border: '2px solid rgba(255,255,255,0.2)',
-                      pointerEvents: 'none',
-                    }} />
-                  </label>
-                </div>
-              </div>
+            <div ref={plotExportRef} style={{ flex: isMobile ? undefined : 1, minHeight: isMobile ? 300 : 0, height: isMobile ? '60vw' : undefined, maxHeight: isMobile ? '65vh' : undefined, padding: 16 }}>
+              <VegaChart spec={fullscreenPlot.vegaLiteSpec} actions />
             </div>
           </div>
         </div>,

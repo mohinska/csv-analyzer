@@ -1,35 +1,32 @@
+import logging
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from backend.api.routes import router
-from backend.config import get_settings
 
-settings = get_settings()
+from backend.app.routers import auth as auth_router
+from backend.app.routers import upload as upload_router
+from backend.app.routers import sessions as sessions_router
+from backend.app.routers import ws as ws_router
 
-app = FastAPI(
-    title="Agent Forge - Data Analyzer",
-    description="AI Agent for analyzing datasets",
-    version="0.1.0",
+# Configure agent logger — all agent.* loggers inherit this
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s  %(message)s",
+    datefmt="%H:%M:%S",
 )
+logging.getLogger("agent").setLevel(logging.DEBUG)
 
-# CORS middleware
+app = FastAPI(title="Data Analyzer API")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins,
+    allow_origins=["http://localhost:3000", "http://161.35.159.20:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Include routes
-app.include_router(router, prefix="/api")
-
-
-if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run(
-        "backend.main:app",
-        host=settings.host,
-        port=settings.port,
-        reload=settings.debug,
-    )
+app.include_router(auth_router.router, prefix="/api/auth", tags=["auth"])
+app.include_router(upload_router.router, prefix="/api", tags=["upload"])
+app.include_router(sessions_router.router, prefix="/api", tags=["sessions"])
+app.include_router(ws_router.router, prefix="/api", tags=["ws"])

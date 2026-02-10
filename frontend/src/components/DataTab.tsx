@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { createPortal } from "react-dom";
-import { Search, ChevronDown, Upload, Loader2, Filter, X, Download, Maximize2 } from "lucide-react";
+import { Search, ChevronDown, Upload, Filter, X, Maximize2 } from "lucide-react";
 
 interface FileInfo {
   filename: string;
@@ -12,52 +12,26 @@ interface FileInfo {
 
 interface DataTabProps {
   fileInfo: FileInfo | null;
-  dataVersion: "current" | "original";
-  onVersionChange: (version: "current" | "original") => void;
-  sessionId: string | null;
   onViewFullData?: () => void;
 }
 
 const RENDER_CHUNK = 200;
 
-export function DataTab({ fileInfo, dataVersion, onVersionChange, sessionId, onViewFullData }: DataTabProps) {
+export function DataTab({ fileInfo, onViewFullData }: DataTabProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [sortColumn, setSortColumn] = useState<string | null>(null);
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
-  const [versionDropdownOpen, setVersionDropdownOpen] = useState(false);
-  const [allRows, setAllRows] = useState<Record<string, unknown>[] | null>(null);
-  const [isLoadingAll, setIsLoadingAll] = useState(false);
   const [visibleCount, setVisibleCount] = useState(RENDER_CHUNK);
   const [columnFilters, setColumnFilters] = useState<Record<string, Set<string>>>({});
   const [filterDropdownCol, setFilterDropdownCol] = useState<string | null>(null);
   const [filterSearch, setFilterSearch] = useState("");
-  const versionBtnRef = useRef<HTMLButtonElement>(null);
   const filterBtnRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const scrollRef = useRef<HTMLDivElement>(null);
-
-  // Auto-fetch all rows when sessionId or version changes
-  useEffect(() => {
-    if (!sessionId || !fileInfo) return;
-    // Only fetch if there are more rows than preview
-    if (fileInfo.row_count <= fileInfo.preview.length) {
-      setAllRows(null);
-      return;
-    }
-    setIsLoadingAll(true);
-    setAllRows(null);
-    fetch(`/api/preview/${sessionId}?rows=99999&version=${dataVersion}`)
-      .then(res => res.json())
-      .then(data => {
-        setAllRows(data.preview);
-        setIsLoadingAll(false);
-      })
-      .catch(() => setIsLoadingAll(false));
-  }, [sessionId, dataVersion, fileInfo?.row_count]);
 
   // Reset visible count when data/search/sort changes
   useEffect(() => {
     setVisibleCount(RENDER_CHUNK);
-  }, [searchQuery, sortColumn, sortDirection, allRows]);
+  }, [searchQuery, sortColumn, sortDirection, fileInfo?.preview]);
 
   // Infinite scroll: load more rows when user scrolls near bottom
   const handleScroll = useCallback(() => {
@@ -70,13 +44,13 @@ export function DataTab({ fileInfo, dataVersion, onVersionChange, sessionId, onV
 
   // Get unique values for a column (for filter dropdown)
   const getUniqueValues = useCallback((col: string) => {
-    const rows = allRows || fileInfo?.preview || [];
+    const rows = fileInfo?.preview || [];
     const uniqueSet = new Set<string>();
     for (const row of rows) {
       uniqueSet.add(String(row[col] ?? "(empty)"));
     }
     return Array.from(uniqueSet).sort();
-  }, [allRows, fileInfo?.preview]);
+  }, [fileInfo?.preview]);
 
   // Check if any column filters are active
   const hasActiveFilters = Object.keys(columnFilters).length > 0;
@@ -112,30 +86,6 @@ export function DataTab({ fileInfo, dataVersion, onVersionChange, sessionId, onV
     setSearchQuery("");
   };
 
-  // Export data as CSV
-  const handleExportCsv = () => {
-    if (!fileInfo) return;
-    const rows = allRows || fileInfo.preview;
-    const cols = fileInfo.columns;
-    const csvRows = [cols.join(",")];
-    for (const row of rows) {
-      csvRows.push(cols.map((col) => {
-        const val = String(row[col] ?? "");
-        // Escape quotes and wrap in quotes if contains comma, quote, or newline
-        if (val.includes(",") || val.includes('"') || val.includes("\n")) {
-          return `"${val.replace(/"/g, '""')}"`;
-        }
-        return val;
-      }).join(","));
-    }
-    const blob = new Blob([csvRows.join("\n")], { type: "text/csv;charset=utf-8;" });
-    const link = document.createElement("a");
-    link.download = fileInfo.filename.replace(".csv", `_${dataVersion}.csv`);
-    link.href = URL.createObjectURL(blob);
-    link.click();
-    URL.revokeObjectURL(link.href);
-  };
-
   // If no file uploaded, show placeholder
   if (!fileInfo) {
     return (
@@ -148,7 +98,7 @@ export function DataTab({ fileInfo, dataVersion, onVersionChange, sessionId, onV
   }
 
   const columns = fileInfo.columns;
-  const data = allRows || fileInfo.preview;
+  const data = fileInfo.preview;
 
   const handleSort = (column: string) => {
     if (sortColumn === column) {
@@ -187,74 +137,11 @@ export function DataTab({ fileInfo, dataVersion, onVersionChange, sessionId, onV
 
   return (
     <div className="flex flex-col h-full" style={{ backgroundColor: '#1e1b2e' }}>
-      {/* Version Dropdown + Search Row + Export */}
+      {/* Search Row */}
       <div className="flex items-center gap-2 px-5 py-3 shrink-0">
-        <div className="shrink-0">
-          <button
-            ref={versionBtnRef}
-            onClick={() => setVersionDropdownOpen(!versionDropdownOpen)}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg transition-colors"
-            style={{
-              background: 'linear-gradient(135deg, rgba(147,51,234,0.4) 0%, rgba(107,33,168,0.5) 100%)',
-              border: '1px solid rgba(147,51,234,0.35)',
-              boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.08), 0 1px 3px rgba(0,0,0,0.2)',
-            }}
-          >
-            <span className="text-[11px]" style={{ fontWeight: 510, color: '#e4e4e7' }}>
-              {dataVersion === "current" ? "Current" : "Initial"}
-            </span>
-            <span className="text-[10px]" style={{ color: '#a1a1aa' }}>
-              {fileInfo.row_count}×{fileInfo.column_count}
-            </span>
-            <ChevronDown className="w-3 h-3" style={{ color: '#a1a1aa' }} />
-          </button>
-          {versionDropdownOpen && createPortal(
-            <>
-              <div
-                style={{ position: 'fixed', inset: 0, zIndex: 9998 }}
-                onClick={() => setVersionDropdownOpen(false)}
-              />
-              <div
-                className="rounded-lg py-1 min-w-[130px]"
-                style={{
-                  position: 'fixed',
-                  zIndex: 9999,
-                  top: (versionBtnRef.current?.getBoundingClientRect().bottom ?? 0) + 4,
-                  left: versionBtnRef.current?.getBoundingClientRect().left ?? 0,
-                  backgroundColor: '#252131',
-                  border: '1px solid rgba(113,113,122,0.3)',
-                  boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
-                }}
-              >
-                <button
-                  onClick={() => {
-                    onVersionChange("original");
-                    setVersionDropdownOpen(false);
-                  }}
-                  className="w-full px-3 py-1.5 text-left text-[12px] flex items-center justify-between gap-4"
-                  style={{ color: dataVersion === "original" ? '#9333ea' : '#e4e4e7' }}
-                  onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.1)'}
-                  onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
-                >
-                  <span style={{ fontWeight: 510 }}>Initial</span>
-                </button>
-                <button
-                  onClick={() => {
-                    onVersionChange("current");
-                    setVersionDropdownOpen(false);
-                  }}
-                  className="w-full px-3 py-1.5 text-left text-[12px] flex items-center justify-between gap-4"
-                  style={{ color: dataVersion === "current" ? '#9333ea' : '#e4e4e7' }}
-                  onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.1)'}
-                  onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
-                >
-                  <span style={{ fontWeight: 510 }}>Original</span>
-                </button>
-              </div>
-            </>,
-            document.body
-          )}
-        </div>
+        <span className="text-[10px] shrink-0" style={{ color: '#a1a1aa' }}>
+          {fileInfo.row_count}×{fileInfo.column_count}
+        </span>
         <div
           className="flex-1 flex items-center gap-1 rounded-full px-2 h-[24px]"
           style={{ backgroundColor: 'rgba(15,13,25,0.6)', border: '1px solid rgba(147,51,234,0.15)' }}
@@ -392,49 +279,29 @@ export function DataTab({ fileInfo, dataVersion, onVersionChange, sessionId, onV
       </div>
 
       {/* Footer — always visible */}
-      <div className="shrink-0 px-5 py-2 flex items-center justify-between relative z-20" style={{ borderTop: '1px solid rgba(147,51,234,0.12)' }}>
-        <p className="text-[10px]" style={{ color: '#a1a1aa' }}>
+      <div className="shrink-0 px-5 py-3 flex items-center justify-between relative z-20" style={{ borderTop: '1px solid rgba(147,51,234,0.12)' }}>
+        <p className="text-[11px]" style={{ color: '#a1a1aa' }}>
           {hasActiveFilters || searchQuery
             ? `${sortedData.length} of ${data.length} rows`
-            : allRows
-              ? `${fileInfo.row_count} rows`
-              : `${fileInfo.preview.length} of ${fileInfo.row_count} rows`
+            : `${fileInfo.preview.length} rows (preview)`
           }
           {displayedData.length < sortedData.length && ` (showing ${displayedData.length})`}
         </p>
-        <div className="flex items-center gap-2">
-          {isLoadingAll && (
-            <div className="flex items-center gap-1.5">
-              <Loader2 className="w-3 h-3 animate-spin" style={{ color: '#9333ea' }} />
-              <span className="text-[10px]" style={{ color: '#a1a1aa' }}>Loading...</span>
-            </div>
-          )}
-          {onViewFullData && (
-            <button
-              onClick={onViewFullData}
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg transition-all hover:opacity-90"
-              style={{
-                backgroundColor: 'rgba(147,51,234,0.12)',
-                border: '1px solid rgba(147,51,234,0.25)',
-              }}
-            >
-              <Maximize2 className="w-3 h-3" style={{ color: '#e4e4e7' }} />
-              <span className="text-[10px]" style={{ fontWeight: 510, color: '#e4e4e7' }}>View Full</span>
-            </button>
-          )}
+        {onViewFullData && (
           <button
-            onClick={handleExportCsv}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg transition-all hover:opacity-90"
+            onClick={onViewFullData}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all"
             style={{
-              background: 'linear-gradient(135deg, rgba(147,51,234,0.4) 0%, rgba(107,33,168,0.5) 100%)',
-              border: '1px solid rgba(147,51,234,0.35)',
-              boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.08), 0 1px 3px rgba(0,0,0,0.2)',
+              backgroundColor: 'rgba(147,51,234,0.12)',
+              border: '1px solid rgba(147,51,234,0.25)',
             }}
+            onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.2)'; e.currentTarget.style.borderColor = 'rgba(147,51,234,0.4)'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.12)'; e.currentTarget.style.borderColor = 'rgba(147,51,234,0.25)'; }}
           >
-            <Download className="w-3 h-3" style={{ color: '#e4e4e7' }} />
-            <span className="text-[10px]" style={{ fontWeight: 510, color: '#e4e4e7' }}>Export CSV</span>
+            <Maximize2 className="w-3.5 h-3.5" style={{ color: '#e4e4e7' }} />
+            <span className="text-[11px]" style={{ fontWeight: 510, color: '#e4e4e7' }}>View Full</span>
           </button>
-        </div>
+        )}
       </div>
 
       {/* Column filter dropdown — portalled */}

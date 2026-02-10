@@ -186,7 +186,8 @@ function parseInlineContent(text: string): React.ReactNode[] {
   const elements: React.ReactNode[] = [];
 
   // Regex for inline math ($...$) - non-greedy, single line
-  const inlineMathRegex = /\$([^\$\n]+)\$/g;
+  // Require first char after $ is NOT a digit or space (avoids matching currency like $165,000)
+  const inlineMathRegex = /\$([^\d\s\$][^\$\n]*?)\$/g;
 
   let lastIndex = 0;
   let match;
