@@ -2,7 +2,9 @@
 
 import asyncio
 import json
+import logging
 import os
+import time
 from typing import Any, Callable, Awaitable
 
 import duckdb
@@ -10,6 +12,8 @@ from sqlalchemy.orm import Session as DBSession
 
 from backend.app.agent.sql_sanitizer import validate_sql
 from backend.app.models.session import Session
+
+logger = logging.getLogger("agent.tools")
 
 SendEvent = Callable[[str, dict], Awaitable[None]]
 
@@ -38,10 +42,12 @@ async def execute_sql_query(
     max_rows: int = MAX_QUERY_ROWS,
 ) -> dict[str, Any]:
     """Execute a SQL query against the dataset. Status is sent from graph.py before calling this."""
+    logger.debug("execute_sql_query: %s", query)
     # Validate SQL first
     try:
         validate_sql(query)
     except ValueError as e:
+        logger.warning("SQL validation failed: %s — query: %s", e, query)
         return {
             "is_error": True,
             "error": str(e),
@@ -92,7 +98,13 @@ async def execute_sql_query(
             if owns_connection:
                 pass  # cursor IS the connection in fallback case, already closed
 
+    t0 = time.perf_counter()
     result = await asyncio.to_thread(_run_query)
+    elapsed = time.perf_counter() - t0
+    if result.get("is_error"):
+        logger.warning("SQL execution error (%.2fs): %s", elapsed, result.get("error"))
+    else:
+        logger.debug("SQL executed in %.2fs — %d rows returned", elapsed, result.get("row_count", 0))
     return result
 
 
@@ -101,6 +113,7 @@ async def execute_output_text(
     send_event: SendEvent,
 ) -> dict[str, Any]:
     """Send a text message to the user."""
+    logger.debug("execute_output_text: %d chars", len(text))
     await send_event("text", {"text": text})
     return {"ok": True}
 
@@ -112,6 +125,7 @@ async def execute_output_table(
     send_event: SendEvent,
 ) -> dict[str, Any]:
     """Send a structured table to the user."""
+    logger.debug("execute_output_table: title=%s, %d cols x %d rows", title, len(headers), len(rows))
     await send_event("table", {
         "title": title,
         "headers": headers,
@@ -126,6 +140,7 @@ async def execute_create_plot(
     send_event: SendEvent,
 ) -> dict[str, Any]:
     """Send a Vega-Lite plot to the user. Truncates data to MAX_PLOT_ROWS."""
+    logger.debug("execute_create_plot: title=%s", title)
     # Enforce row limit on inline data
     if "data" in vega_lite_spec and "values" in vega_lite_spec["data"]:
         values = vega_lite_spec["data"]["values"]
@@ -142,10 +157,12 @@ async def execute_create_plot(
 async def execute_finalize(
     session_title: str | None,
     send_event: SendEvent,
+    suggestions: list[str] | None = None,
     db: DBSession | None = None,
     session_id: str | None = None,
 ) -> dict[str, Any]:
     """End the current turn. Optionally set the session title."""
+    logger.debug("execute_finalize: session_title=%s, suggestions=%s", session_title, suggestions)
     if session_title and db and session_id:
         session = db.query(Session).filter(Session.id == session_id).first()
         if session:
@@ -153,5 +170,5 @@ async def execute_finalize(
             db.commit()
         await send_event("session_update", {"title": session_title})
 
-    await send_event("done", {"data_updated": False})
+    await send_event("done", {"data_updated": False, "suggestions": suggestions or []})
     return {"ok": True}

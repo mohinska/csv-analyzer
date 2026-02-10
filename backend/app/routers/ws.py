@@ -1,5 +1,6 @@
 import json
 import asyncio
+import logging
 from functools import partial
 from typing import Any
 
@@ -13,6 +14,8 @@ from backend.app.utils.security import decode_access_token
 from backend.app.agent.graph import run_agent
 from backend.app.agent.persistence import save_user_message
 
+logger = logging.getLogger("agent.ws")
+
 router = APIRouter()
 
 # Track running agent tasks so we can cancel on "stop"
@@ -20,6 +23,8 @@ _active_tasks: dict[str, asyncio.Task] = {}
 
 
 async def send_event(ws: WebSocket, event: str, data: dict) -> None:
+    if event != "text_delta":  # text_delta is too noisy
+        logger.debug("WS send: event=%s data_keys=%s", event, list(data.keys()))
     await ws.send_json({"event": event, "data": data})
 
 
@@ -51,6 +56,7 @@ async def websocket_chat(
     # Auth: validate JWT from query param
     user_id = decode_access_token(token)
     if not user_id:
+        logger.warning("WS auth failed for session=%s", session_id)
         await websocket.close(code=1008, reason="Invalid or expired token")
         return
 
@@ -78,6 +84,7 @@ async def websocket_chat(
     file_metadata = _build_file_metadata(file_record)
 
     await websocket.accept()
+    logger.info("WS connected: session=%s user=%s", session_id, user_id)
 
     try:
         while True:
@@ -86,26 +93,32 @@ async def websocket_chat(
             try:
                 data = json.loads(raw)
             except json.JSONDecodeError:
+                logger.warning("WS received invalid JSON: %s", raw[:100])
                 await send_event(websocket, "error", {"message": "Invalid JSON"})
                 continue
 
             msg_type = data.get("type")
+            logger.info("WS received: type=%s session=%s", msg_type, session_id)
 
             if msg_type == "message":
+                logger.info("User message: %s", data.get("text", "")[:200])
                 await handle_message(websocket, session_id, file_path, file_metadata, data.get("text", ""))
             elif msg_type == "auto_analyze":
                 await handle_auto_analyze(websocket, session_id, file_path, file_metadata)
             elif msg_type == "stop":
+                logger.info("User requested stop for session=%s", session_id)
                 await handle_stop(websocket, session_id)
             else:
                 await send_event(websocket, "error", {"message": f"Unknown message type: {msg_type}"})
 
     except WebSocketDisconnect:
+        logger.info("WS disconnected: session=%s", session_id)
         # Clean up any running task
         task = _active_tasks.pop(session_id, None)
         if task:
             task.cancel()
     except Exception as e:
+        logger.exception("WS error for session=%s: %s", session_id, e)
         try:
             await send_event(websocket, "error", {"message": str(e)})
             await send_event(websocket, "done", {"data_updated": False})

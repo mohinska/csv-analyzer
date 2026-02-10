@@ -2,10 +2,14 @@
 
 import asyncio
 import json
+import logging
+import time
 from typing import Any, Callable, Awaitable
 
 import anthropic
 from sqlalchemy.orm import Session as DBSession
+
+logger = logging.getLogger("agent")
 
 from backend.app.agent.context import build_data_summary, get_system_prompt, build_messages_for_llm
 from backend.app.agent.persistence import save_reasoning, save_tool_message
@@ -93,8 +97,13 @@ TOOL_DEFINITIONS = [
                     "type": ["string", "null"],
                     "description": "Short descriptive title for this session (only set after initial analysis, null otherwise)",
                 },
+                "suggestions": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Exactly 2 short follow-up questions the user might ask next, relevant to the current analysis",
+                },
             },
-            "required": [],
+            "required": ["suggestions"],
         },
     },
 ]
@@ -124,6 +133,8 @@ async def call_llm_streaming(
     send_event: SendEvent,
 ) -> Any:
     """Call the Anthropic API with streaming. Sends text_delta events for output_text tool content."""
+    logger.info("LLM call started (model=%s, messages=%d)", MODEL, len(messages))
+    t0 = time.perf_counter()
     current_tool_name: str | None = None
     streaming_output_text = False
     # For incremental text extraction from partial JSON
@@ -200,6 +211,15 @@ async def call_llm_streaming(
 
         response = await stream.get_final_message()
 
+    elapsed = time.perf_counter() - t0
+    usage = response.usage
+    logger.info(
+        "LLM call completed in %.2fs (input_tokens=%d, output_tokens=%d, stop_reason=%s)",
+        elapsed,
+        usage.input_tokens,
+        usage.output_tokens,
+        response.stop_reason,
+    )
     return response
 
 
@@ -225,8 +245,14 @@ async def run_agent(
         db_messages: Pre-loaded conversation history. Loaded from DB if not provided.
         should_stop: If True, skip execution and send done immediately.
     """
+    logger.info(
+        "=== Agent run started (session=%s, initial_analysis=%s) ===",
+        session_id, is_initial_analysis,
+    )
+
     # Early exit on stop
     if should_stop:
+        logger.info("Agent run skipped (should_stop=True)")
         await send_event("done", {"data_updated": False})
         return
 
@@ -234,7 +260,13 @@ async def run_agent(
 
     # Build file metadata if not provided (run in thread — DuckDB is blocking)
     if not file_metadata:
+        logger.debug("Building file metadata from disk: %s", file_path)
         file_metadata = await asyncio.to_thread(_get_file_metadata, file_path)
+
+    logger.info(
+        "File metadata: %d rows, %d columns",
+        file_metadata["row_count"], file_metadata["col_count"],
+    )
 
     # Build system prompt
     data_summary = build_data_summary(
@@ -260,9 +292,12 @@ async def run_agent(
     # Create a shared DuckDB connection for the entire agent run
     conn = await asyncio.to_thread(create_duckdb_connection, file_path)
 
+    logger.info("Conversation history: %d messages for LLM", len(llm_messages))
+
     try:
         # Agent loop
-        for _ in range(MAX_ITERATIONS):
+        for iteration in range(MAX_ITERATIONS):
+            logger.info("--- Iteration %d/%d ---", iteration + 1, MAX_ITERATIONS)
             response = await call_llm_streaming(client, system_prompt, llm_messages, TOOL_DEFINITIONS, send_event)
 
             # Extract reasoning text and tool calls from response
@@ -283,10 +318,12 @@ async def run_agent(
             # Save reasoning if present
             reasoning_text = "\n".join(reasoning_parts).strip()
             if reasoning_text:
+                logger.info("Reasoning:\n%s", reasoning_text)
                 save_reasoning(db, session_id, reasoning_text)
 
             # No tool calls — agent is done (shouldn't happen normally, but safety net)
             if not tool_calls:
+                logger.info("No tool calls returned — ending agent loop")
                 await send_event("done", {"data_updated": False})
                 return
 
@@ -297,6 +334,24 @@ async def run_agent(
                 tool_input = tc["input"] if isinstance(tc, dict) else tc.input
                 tool_id = tc["id"] if isinstance(tc, dict) else tc.id
                 parsed_calls.append((tool_id, tool_name, tool_input))
+
+            logger.info(
+                "Tool calls (%d): %s",
+                len(parsed_calls),
+                ", ".join(f"{name}(id={tid})" for tid, name, _ in parsed_calls),
+            )
+            for tid, name, inp in parsed_calls:
+                if name == "sql_query":
+                    logger.info("  sql_query: %s", inp.get("query", ""))
+                elif name == "output_text":
+                    preview = (inp.get("text") or "")[:120]
+                    logger.info("  output_text: %s...", preview)
+                elif name == "create_plot":
+                    logger.info("  create_plot: title=%s", inp.get("title"))
+                elif name == "output_table":
+                    logger.info("  output_table: title=%s, rows=%d", inp.get("title"), len(inp.get("rows", [])))
+                elif name == "finalize":
+                    logger.info("  finalize: session_title=%s", inp.get("session_title"))
 
             # Send status events before executing
             for tool_id, tool_name, tool_input in parsed_calls:
@@ -315,14 +370,25 @@ async def run_agent(
                     conn=conn,
                 )
 
+            t_tools = time.perf_counter()
             results = await asyncio.gather(
                 *[_run_tool(name, inp) for _, name, inp in parsed_calls]
             )
+            logger.info("All tools executed in %.2fs", time.perf_counter() - t_tools)
 
             # Persist and build tool results in original order
             tool_results = []
             finalize_called = False
             for (tool_id, tool_name, tool_input), result in zip(parsed_calls, results):
+                if result.get("is_error"):
+                    logger.warning("Tool %s returned error: %s", tool_name, result.get("error"))
+                elif tool_name == "sql_query":
+                    logger.info(
+                        "Tool sql_query result: %d rows, %d columns",
+                        result.get("row_count", 0), len(result.get("columns", [])),
+                    )
+                else:
+                    logger.info("Tool %s result: ok=%s", tool_name, result.get("ok"))
                 _persist_tool_result(db, session_id, tool_name, tool_input, result)
 
                 tool_results.append({
@@ -353,9 +419,11 @@ async def run_agent(
             llm_messages.append({"role": "user", "content": tool_results})
 
             if finalize_called:
+                logger.info("=== Agent run finished (finalized) ===")
                 return
 
         # Max iterations reached — force done
+        logger.warning("=== Agent run stopped: max iterations (%d) reached ===", MAX_ITERATIONS)
         await send_event("done", {"data_updated": False})
     finally:
         conn.close()
@@ -403,6 +471,7 @@ async def _execute_tool_core(
     elif tool_name == "finalize":
         return await execute_finalize(
             session_title=tool_input.get("session_title"),
+            suggestions=tool_input.get("suggestions", []),
             send_event=send_event,
             db=db,
             session_id=session_id,

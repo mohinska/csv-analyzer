@@ -137,6 +137,7 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
   const [isMobile, setIsMobile] = useState(false);
   const [copiedId, setCopiedId] = useState<number | null>(null);
   const [loadingSessionId, setLoadingSessionId] = useState<string | null>(null);
+  const [suggestions, setSuggestions] = useState<string[]>([]);
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
   const [isSavingPlot, setIsSavingPlot] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(340);
@@ -412,6 +413,7 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
         if (data.data_updated) {
           refreshFileInfo();
         }
+        setSuggestions((data.suggestions as string[]) || []);
         setIsLoading(false);
         // Safety net: no visible response received for this turn
         if (!responseReceivedRef.current) {
@@ -659,6 +661,7 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
 
     setMessages((prev) => [...prev, { id: Date.now(), role: "user", text }]);
     setChatInput("");
+    setSuggestions([]);
     setIsLoading(true);
     responseReceivedRef.current = false;
     wsRef.current.send(JSON.stringify({ type: "message", text }));
@@ -1460,6 +1463,31 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
                         </span>
                       </div>
                     </div>
+                  </div>
+                )}
+                {suggestions.length > 0 && !isLoading && (
+                  <div className="flex gap-2 flex-wrap mt-2">
+                    {suggestions.map((s, i) => (
+                      <button
+                        key={i}
+                        onClick={() => handleSend(s)}
+                        style={{
+                          padding: '10px 16px',
+                          borderRadius: 14,
+                          backgroundColor: 'rgba(147,51,234,0.10)',
+                          border: '1px solid rgba(147,51,234,0.25)',
+                          color: '#e4e4e7',
+                          fontSize: 13,
+                          fontWeight: 470,
+                          cursor: 'pointer',
+                          transition: 'all 0.15s',
+                        }}
+                        onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.20)'; e.currentTarget.style.borderColor = 'rgba(147,51,234,0.4)'; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.10)'; e.currentTarget.style.borderColor = 'rgba(147,51,234,0.25)'; }}
+                      >
+                        {s}
+                      </button>
+                    ))}
                   </div>
                 )}
                 <div ref={messagesEndRef} />
